@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -286,5 +287,28 @@ func TestTrustedLocalDesktopEntryAndWorkload(t *testing.T) {
 	w = request(gateway, "POST", "/api/client/trusted-login", gateway.origin, string(body), true)
 	if w.Code != http.StatusOK || !workload.account.viewFor(true).Unlocked || workload.account.viewFor(false).Unlocked {
 		t.Fatalf("password account did not resume privately after reload: %d %s", w.Code, w.Body.String())
+	}
+	// The two controllers have separate device authority. The native client's
+	// cookie is checked here, then replaced by the gateway's private upstream jar.
+	gateway.token = randomToken()
+	enroll := func(native bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", gateway.origin+"/api/account/device-enroll", strings.NewReader(`{"kind":"automatic"}`))
+		r.Header.Set("Origin", gateway.origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set(connectionHeader, d.generation)
+		r.AddCookie(&http.Cookie{Name: gateway.cookieName(), Value: gateway.session})
+		if native {
+			r.AddCookie(deviceCookie(gateway.cookieName(), gateway.token))
+		}
+		w := httptest.NewRecorder()
+		gateway.handler().ServeHTTP(w, r)
+		return w
+	}
+	if w := enroll(false); w.Code != http.StatusForbidden || len(workload.account.record.Devices) != 0 {
+		t.Fatal("browser session enrolled a device through the local gateway")
+	}
+	var credential deviceCredential
+	if w := enroll(true); w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &credential) != nil || credential.Secret == "" || workload.account.record.Devices["automatic"].ID != credential.ID {
+		t.Fatal("authenticated native session could not enroll through the local gateway")
 	}
 }

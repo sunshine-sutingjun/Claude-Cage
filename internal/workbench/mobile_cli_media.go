@@ -75,7 +75,7 @@ func (s *Server) mobileSessionMedia(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if view.Archived || isClientMountPath(view.Workspace) {
+	if view.Archived || isClientMountPath(view.Workspace) || view.Workspace == guestWorkspaceID {
 		http.Error(w, "此项目当前无法预览文件。", 409)
 		return
 	}

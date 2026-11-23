@@ -299,7 +299,7 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		if s.macOSLegacyWorkspace(sharedRecord) != "" {
 			workspace, err = s.projectWorkspace(sharedRecord.Workspace)
 		} else {
-			workspace, err = s.connectProject(input.Workspace, false)
+			workspace, err = s.connectTerminalWorkspace(input.Workspace)
 		}
 		if err != nil {
 			return nil, err
@@ -318,7 +318,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	script := terminalScript(s.cliWorkspace(workspace), input.Kind, launchCommand)
 	if s.macosGuest != nil {
 		script = `cd -- "$HOME" && exec env TERM=xterm-256color COLORTERM=truecolor /bin/zsh -l`
-		if input.Kind != "claude-login" {
+		if workspace == guestWorkspaceID && input.Kind != "claude-login" {
+			script = "cd -- " + shellescape.Quote(s.cliWorkspace(workspace)) + " && exec env TERM=xterm-256color COLORTERM=truecolor /bin/zsh -l"
+		} else if input.Kind != "claude-login" {
 			script = "exec /usr/local/libexec/cage-macos-terminal " + shellescape.Quote(macOSProjectPath(s.macosGuest.User, workspace))
 		}
 	}

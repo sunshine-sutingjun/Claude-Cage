@@ -77,11 +77,6 @@ func Build(s Shares) ([]vm.Mount, []FileMount) {
 			}
 			dir := paths.Host(filepath.Join(s.StateDir, "file-mounts", s.VM, strconv.Itoa(idx)))
 			staged := dir + "/" + filepath.Base(e.Src)
-			if !Stage(e.Src, staged, s.Warn) {
-				w("Warning: Failed to stage '%s', skipping.", e.Src)
-				os.RemoveAll(dir)
-				continue
-			}
 			mp := "/tmp/.agent-vm-file-mounts/" + strconv.Itoa(idx)
 			bind := dst
 			if bind == "" {
@@ -113,14 +108,30 @@ func Build(s Shares) ([]vm.Mount, []FileMount) {
 	return out, files
 }
 
-// Stage puts src at dst by a hardlink, which keeps it in step with the host
+// Stage makes src the only file in dst's dedicated staging directory,
+// removing previous basenames before the directory can be shared again.
+// It uses a hardlink, which keeps the file in step with the host
 // (same inode) without sharing its folder; by a copy when they are on two
 // file systems, with a warning: then changes reach the VM on its next start.
 func Stage(src, dst string, warn io.Writer) bool {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return false
 	}
-	os.Remove(dst)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(dst) {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return false
+			}
+		}
+	}
 	// The file itself: link(2) links a symlink as one (stow's dotfiles), which
 	// would leave dst pointing out of the folder the VM is given. The checks
 	// made on src were on that file too (UnsafeLocation).
@@ -129,6 +140,16 @@ func Stage(src, dst string, warn io.Writer) bool {
 		return false
 	}
 	src = physical
+	fi, err := os.Stat(src)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	if current, err := os.Lstat(dst); err == nil && os.SameFile(fi, current) {
+		return true
+	}
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return false
+	}
 	if os.Link(src, dst) == nil {
 		return true
 	}
@@ -137,16 +158,17 @@ func Stage(src, dst string, warn io.Writer) bool {
 		return false
 	}
 	defer in.Close()
-	fi, err := in.Stat()
-	if err != nil {
+	opened, err := in.Stat()
+	if err != nil || !os.SameFile(opened, fi) {
 		return false
 	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
 	if err != nil {
 		return false
 	}
 	_, cerr := io.Copy(out, in)
 	if err := out.Close(); cerr != nil || err != nil {
+		os.Remove(dst)
 		return false
 	}
 	os.Chtimes(dst, fi.ModTime(), fi.ModTime())

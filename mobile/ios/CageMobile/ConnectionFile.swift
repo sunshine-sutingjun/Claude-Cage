@@ -133,9 +133,9 @@ enum HostKeychain {
         var records = try readAll(); records.removeAll {$0.host == record.host}; records.append(record)
         try store(records)
     }
-    static func forget(host: Host? = nil) throws {
+    static func forget(host: Host) throws {
         var records = try readAll()
-        if let host {records.removeAll {$0.host == host}} else {records = []}
+        records.removeAll {$0.host == host}
         // Writing the collection also prevents an old v1 record from reappearing.
         try store(records)
     }

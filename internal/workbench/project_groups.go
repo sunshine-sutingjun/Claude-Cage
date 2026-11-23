@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,9 +17,10 @@ import (
 // Workspace is the stable default directory and preserves transcript identity.
 // Paths remain the individual host grants; groups only associate those grants.
 type projectGroup struct {
-	Workspace string   `json:"workspace"`
-	Name      string   `json:"name"`
-	Folders   []string `json:"folders"`
+	Workspace   string                       `json:"workspace"`
+	Name        string                       `json:"name"`
+	Folders     []string                     `json:"folders"`
+	FolderModes map[string]projectFolderMode `json:"folder_modes,omitempty"`
 }
 
 func (s *Server) readSharedProjects() (sharedProjects, error) {
@@ -38,10 +40,7 @@ func (s *Server) projectGroups() ([]projectGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths, err := s.projectPaths()
-	if err != nil {
-		return nil, err
-	}
+	paths := s.projectPathsFromSaved(saved)
 	groups := []projectGroup{}
 	covered := map[string]bool{}
 	for _, group := range saved.Groups {
@@ -109,7 +108,7 @@ func (s *Server) projectAdditionalDirectories(workspace string) ([]string, error
 
 // Saving and opening share the macOS approval flow. Approval never persists a
 // partial group; the caller retries the complete request after GUI approval.
-func (s *Server) projectConnectionError(w http.ResponseWriter, err error, folder string) {
+func (s *Server) projectConnectionError(w http.ResponseWriter, err error, folder string) *projectApprovalPrompt {
 	if errors.Is(err, errMacOSProjectApproval) {
 		if canonical, pathErr := validateWorkspace(folder, s.profile); pathErr == nil {
 			folder = canonical
@@ -133,8 +132,9 @@ func (s *Server) projectConnectionError(w http.ResponseWriter, err error, folder
 			_, openErr := s.guestControl(ctx, "/usr/bin/open -a /Applications/CageProjectAccess.app", "macos-project-approval")
 			cancel()
 			if openErr == nil {
-				jsonReply(w, map[string]string{"workspace": folder, "approval": grant})
-				return
+				prompt := &projectApprovalPrompt{Workspace: folder, Approval: grant}
+				jsonReply(w, prompt)
+				return prompt
 			}
 			err = &projectShareError{Recovery: "project-approval", Message: "未能显示项目授权窗口，请重试"}
 		}
@@ -144,6 +144,7 @@ func (s *Server) projectConnectionError(w http.ResponseWriter, err error, folder
 		w.Header().Set("X-Cage-Recovery", failure.Recovery)
 	}
 	requestError(w, err)
+	return nil
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +181,7 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate every directory before opening any transport, including aliases.
 	folders := []string{}
+	aliases := make(map[string]string, len(input.Folders))
 	for _, folder := range input.Folders {
 		if isClientMountPath(folder) {
 			http.Error(w, "临时客户端共享请单独管理", http.StatusBadRequest)
@@ -193,6 +195,12 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 		if !slices.Contains(folders, path) {
 			folders = append(folders, path)
 		}
+		aliases[folder] = path
+	}
+	requestedModes, err := requestedProjectFolderModes(input.FolderModes, aliases)
+	if err != nil {
+		requestError(w, err)
+		return
 	}
 	var previous *projectGroup
 	if input.Workspace != "" {
@@ -235,51 +243,87 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	currentModes := s.projectFolderModes(saved)
+	finalModes := maps.Clone(currentModes)
+	for _, folder := range removed {
+		delete(finalModes, folder)
+	}
+	input.FolderModes = nil
+	var changed []string
+	for _, folder := range folders {
+		mode, specified := requestedModes[folder]
+		if !specified {
+			mode = saved.folderMode(folder)
+		}
+		if old, exists := currentModes[folder]; exists && old != mode {
+			changed = append(changed, folder)
+		}
+		finalModes[folder] = mode
+		if mode == projectFolderRead {
+			if input.FolderModes == nil {
+				input.FolderModes = make(map[string]projectFolderMode)
+			}
+			input.FolderModes[folder] = mode
+		}
+	}
+	for _, folder := range folders {
+		if err := s.checkProjectFolderMode(folder, finalModes[folder], finalModes); err != nil {
+			requestError(w, err)
+			return
+		}
+	}
 	var affected []string
 	if len(removed) > 0 {
 		affected = previous.Folders
+	}
+	if len(changed) > 0 {
+		affected = folders
+		if len(removed) > 0 {
+			affected = append(slices.Clone(folders), removed...)
+		}
 	}
 	if err := s.checkProjectFoldersIdle(r.Context(), affected, true); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	// Failed creation must not leave new, invisible directory transports alive.
-	// Keep a pending macOS approval until the same save request is retried.
-	s.mu.Lock()
-	initialShares := make(map[string]*projectShare, len(folders))
-	for _, folder := range folders {
-		initialShares[folder] = s.projectShares[folder]
+	prior := s.swapPendingProjectGroup(nil)
+	if prior != nil && (prior.workspace != input.Workspace || !slices.Equal(prior.folders, folders) || !maps.Equal(prior.modes, input.FolderModes)) {
+		s.cancelMacOSProjectApproval(prior.prompt.Workspace, prior.prompt.Approval)
+		s.discardUncommittedProjectShares(prior.shares)
+		prior = nil
 	}
-	s.mu.Unlock()
-	committed, approving := false, false
+	committed := false
+	var prompt *projectApprovalPrompt
 	defer func() {
-		if committed || approving {
+		if committed {
 			return
 		}
-		var created []string
-		s.mu.Lock()
-		for _, folder := range folders {
-			if initialShares[folder] == nil && s.projectShares[folder] != nil {
-				created = append(created, folder)
-			}
+		if prior != nil && (prompt == nil || *prompt != prior.prompt) {
+			s.cancelMacOSProjectApproval(prior.prompt.Workspace, prior.prompt.Approval)
 		}
-		s.mu.Unlock()
-		s.detachProjectFolders(created)
+		staged := s.uncommittedProjectShares(folders, currentModes)
+		if prompt == nil {
+			s.discardUncommittedProjectShares(staged)
+			return
+		}
+		s.swapPendingProjectGroup(&pendingProjectGroup{
+			workspace: input.Workspace, folders: folders, modes: input.FolderModes, prompt: *prompt, shares: staged,
+		})
 	}()
 	for _, folder := range folders {
-		if err := s.ensureProjectShare(folder); err != nil {
-			approving = errors.Is(err, errMacOSProjectApproval)
-			s.projectConnectionError(w, err, folder)
+		// Changed modes take effect only once saved. A replacement that overlaps
+		// a revoked grant also waits until that grant has been detached.
+		if slices.Contains(changed, folder) || s.checkProjectFolderMode(folder, finalModes[folder], currentModes) != nil {
+			continue
+		}
+		if err := s.ensureProjectShareMode(folder, finalModes[folder]); err != nil {
+			prompt = s.projectConnectionError(w, err, folder)
 			return
 		}
 	}
 	input.Folders = append([]string{input.Workspace}, slices.DeleteFunc(slices.Clone(folders), func(p string) bool { return p == input.Workspace })...)
 	// Preserve the legacy current grant even when it was never in paths.
-	paths, err := s.projectPaths()
-	if err != nil {
-		requestError(w, err)
-		return
-	}
+	paths := s.projectPathsFromSaved(saved)
 	saved.Paths = slices.DeleteFunc(paths, func(p string) bool { return isClientMountPath(p) || slices.Contains(removed, p) })
 	for _, folder := range folders {
 		if !slices.Contains(saved.Paths, folder) {
@@ -298,6 +342,8 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
+	// Stop the old transports before publishing permission changes on disk.
+	s.detachProjectFolders(changed)
 	if err := writePrivate(filepath.Join(s.profile, "projects.json"), saved); err != nil {
 		requestError(w, err)
 		return

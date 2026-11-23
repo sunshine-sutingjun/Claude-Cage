@@ -5,7 +5,7 @@ import { createServer } from "vite";
 import { createWorkbench } from "./workbench-fixture.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const vite = await createServer({root, configFile:`${root}/vite.config.js`, server:{host:"127.0.0.1",port:0}});
+const vite = await createServer({root, configFile:`${root}/vite.config.js`, server:{host:"127.0.0.1",port:0,watch:null,hmr:false}});
 await vite.listen();
 const url = `http://127.0.0.1:${vite.httpServer.address().port}`;
 const screenshots = fileURLToPath(new URL("../../output/project-folders/", import.meta.url));
@@ -29,12 +29,17 @@ try {
       await dialog.getByLabel("项目名称",{exact:true}).fill("课程系统");
       await dialog.getByRole("button",{name:"选择文件夹…",exact:true}).click();
       await dialog.getByText(a,{exact:true}).waitFor();
-      state.chosenFolder=b;
-      await dialog.getByRole("button",{name:"选择文件夹…",exact:true}).click();
+      await dialog.getByLabel("添加文件夹", {exact:true}).fill(b);
+      await dialog.getByRole("combobox", {name:"backend 的共享权限"}).selectOption("read");
+      await dialog.getByRole("button", {name:"添加",exact:true}).click();
       await dialog.getByText(b,{exact:true}).waitFor();
       const folders = dialog.getByRole("list",{name:"已绑定文件夹"});
       assert.equal(await folders.getByRole("listitem").count(),2);
       assert.equal(await folders.getByText("默认",{exact:true}).count(),1);
+      await folders.getByRole("combobox", {name:"frontend 的共享权限"}).selectOption("read");
+      assert.equal(await folders.getByRole("combobox", {name:"backend 的共享权限"}).inputValue(), "read");
+      await folders.getByRole("combobox", {name:"backend 的共享权限"}).selectOption("write");
+      assert.equal(await folders.getByRole("combobox", {name:"backend 的共享权限"}).inputValue(), "write");
       await page.screenshot({path:`${screenshots}/${platform}-create.png`});
       state.failJob=true;
       await dialog.getByRole("button",{name:"创建项目",exact:true}).click();
@@ -45,6 +50,7 @@ try {
       await page.getByRole("region",{name:"项目 课程系统",exact:true}).waitFor();
       assert.equal(state.settings.workspace,a);
       assert.deepEqual(state.status.projects,[a,b]);
+      assert.deepEqual(state.status.project_groups[0].folder_modes, {[a]: "read"});
       await page.reload();
       const project = page.getByRole("region",{name:"项目 课程系统",exact:true});
       await project.waitFor();
@@ -62,6 +68,7 @@ try {
       dialog=page.getByRole("dialog",{name:"打开项目",exact:true});
       await dialog.getByRole("button",{name:"编辑名称与文件夹…",exact:true}).click();
       dialog=page.getByRole("dialog",{name:"编辑项目",exact:true});
+      assert.equal(await dialog.getByRole("combobox", {name:"frontend 的共享权限"}).inputValue(), "read");
       assert.equal(await dialog.getByRole("button",{name:"移除文件夹 frontend",exact:true}).isDisabled(),true);
       await dialog.getByRole("button",{name:"移除文件夹 backend",exact:true}).click();
       await dialog.getByRole("button",{name:"保存项目",exact:true}).click();
@@ -79,10 +86,11 @@ try {
       await dialog.getByRole("button",{name:"保存项目",exact:true}).click();
       await page.getByRole("region",{name:"项目 课程工作区",exact:true}).waitFor();
       assert.deepEqual(state.status.projects,[a]);
+      assert.deepEqual(state.status.project_groups[0].folder_modes, {[a]: "read"});
       await page.reload();
       await page.getByRole("region",{name:"项目 课程工作区",exact:true}).waitFor();
       assert.deepEqual(errors,[]);
-      console.log(`PASS ${platform}: create, retry, refresh, member editor, default terminal, active-session unbind guard, rename and unbind`);
+      console.log(`PASS ${platform}: create, mixed folder permissions, retry, refresh, member editor, default terminal, active-session unbind guard, rename and unbind`);
     } finally {await browser.close();}
   }
 } finally {await vite.close();}

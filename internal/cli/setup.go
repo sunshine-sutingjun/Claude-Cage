@@ -240,12 +240,9 @@ func (e *app) swapBase(ctx context.Context, b vm.Backend) bool {
 		return false
 	}
 	defer unlock()
-	if d := filepath.Join(LimaHome(e.state), vmname.Template); isDirNoYAML(d) {
-		fmt.Fprintf(w, "Detected partial VM state at %s (no lima.yaml): cleaning up.\n", d)
-		if err := os.RemoveAll(d); err != nil {
-			fmt.Fprintf(w, "Error: could not remove %s: %v\n", d, err)
-			return false
-		}
+	if err := prepareInstanceDir(filepath.Join(LimaHome(e.state), vmname.Template)); err != nil {
+		fmt.Fprintf(w, "Error: %v\n", err)
+		return false
 	}
 	// Forgets the old base's markers with it: from here on, nothing says a
 	// base is ready.
@@ -413,12 +410,9 @@ func (e *app) buildBase(ctx context.Context, in install, disk, memory, cpus int)
 	}
 	warnDomains(e.state, e.io.Stderr)
 	// A build an earlier setup left, finished or not, is not this one's.
-	if d := filepath.Join(LimaHome(e.state), building); isDirNoYAML(d) {
-		fmt.Fprintf(e.io.Stderr, "Detected partial VM state at %s (no lima.yaml): cleaning up.\n", d)
-		if err := os.RemoveAll(d); err != nil {
-			fmt.Fprintf(e.io.Stderr, "Error: could not remove %s: %v\n", d, err)
-			return 1
-		}
+	if err := prepareInstanceDir(filepath.Join(LimaHome(e.state), building)); err != nil {
+		fmt.Fprintf(e.io.Stderr, "Error: %v\n", err)
+		return 1
 	}
 	resume := false
 	if os.Getenv("CLAUDE_CAGE_CONFIG") != "" {

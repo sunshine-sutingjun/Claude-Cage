@@ -140,6 +140,12 @@ func run(ctx context.Context, args []string, out, errs io.Writer) error {
 	if err != nil {
 		return err
 	}
+	monitorPeer := func() (context.Context, func()) {
+		return monitorTrust(ctx, func() bool {
+			current, err := trustedPeer(state)
+			return err == nil && current == peer
+		})
+	}
 	if cmd == "host" {
 		if serveSaved {
 			if base != "" || adminFile != "" || invitation != "" || connectionFile != "" || cageBinary != "" || config != "" {
@@ -197,19 +203,21 @@ func run(ctx context.Context, args []string, out, errs io.Writer) error {
 			return err
 		}
 		fmt.Fprintln(out, "Private client invitation saved. Waiting for the trusted device.")
-		active, stop := monitorTrust(ctx, func() bool { current, err := trustedPeer(state); return err == nil && current == peer })
-		defer stop()
-		stopAwake := keepHostAwake(active, log.New(errs, "", 0))
+		ctx, stopTrust := monitorPeer()
+		defer stopTrust()
+		stopAwake := keepHostAwake(ctx, log.New(errs, "", 0))
 		defer stopAwake()
-		err = mobilelink.ServeHost(active, base, room.ID, room.HostToken, id, peer, b)
-		if active.Err() != nil {
-			return context.Cause(active)
+		err = mobilelink.ServeHost(ctx, base, room.ID, room.HostToken, id, peer, b)
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
 		}
 		return err
 	}
 	if launchFile == "" || webDir == "" {
 		return errors.New("client requires --web-dir and a new --launch-file")
 	}
+	ctx, stopTrust := monitorPeer()
+	defer stopTrust()
 	var room clientInvitation
 	if connectionFile != "" {
 		if invitation != "" {
@@ -261,6 +269,9 @@ func run(ctx context.Context, args []string, out, errs io.Writer) error {
 	defer stop()
 	err = server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
+		if errors.Is(context.Cause(ctx), errRevoked) {
+			return errRevoked
+		}
 		return nil
 	}
 	return err

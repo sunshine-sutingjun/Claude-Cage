@@ -218,7 +218,7 @@ export function WorkspaceSidebar({
               >
                 <button
                   className="project-disclosure"
-                  title={folders.join("\n")}
+                  title={group?.guest ? "保存在客机磁盘中的工作区" : folders.join("\n")}
                   aria-expanded={expanded}
                   onClick={() => {
                     setCollapsed((previous) => ({
@@ -232,7 +232,7 @@ export function WorkspaceSidebar({
                   {expanded ? <FolderOpen size={16} /> : <Folder size={16} />}
                   <span>{project}</span>
                 </button>
-                <button
+                {!group?.guest && <button
                   className="icon-button"
                   aria-label={`打开 ${project} 的编辑器`}
                   title="在 code-server 中打开项目目录"
@@ -240,7 +240,7 @@ export function WorkspaceSidebar({
                   onClick={() => onEditor(path)}
                 >
                   <ExternalLink size={15} />
-                </button>
+                </button>}
                 <button
                   className="icon-button"
                   aria-label={`在 ${project} 新建终端`}

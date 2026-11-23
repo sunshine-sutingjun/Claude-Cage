@@ -114,6 +114,7 @@ function App() {
     [projectDialog, setProjectDialog] = useState(null),
     [rename, setRename] = useState(null),
     [toast, setToast] = useState(""),
+    [macWindowStatus, setMacWindowStatus] = useState(""),
     [projectRefreshing, setProjectRefreshing] = useState(false),
     [fatal, setFatal] = useState(""),
     [connectionError, setConnectionError] = useState(""),
@@ -267,12 +268,17 @@ function App() {
   useEffect(() => {
     if (audio.error) setToast(audio.error);
   }, [audio.error]);
-  const groups = projectGroups(status);
+  const guestWorkspace = status?.guest_workspace;
+  const sharedGroups = projectGroups(status);
+  const groups = guestWorkspace
+    ? [{ workspace: guestWorkspace, name: "客机工作区", folders: [guestWorkspace], guest: true }, ...sharedGroups]
+    : sharedGroups;
   const projects = groups.map(group => group.workspace);
   const selectedWorkspace = selectedProject || status?.workspace;
   const workspace = groups.find(group => group.folders.includes(selectedWorkspace))?.workspace || selectedWorkspace;
   const contentWorkspace =
     terminal && !showHome ? current.workspace : workspace;
+  const showProjectPickerShortcut = guestWorkspace && (!contentWorkspace || contentWorkspace === guestWorkspace);
   const setupProxy = !nativeGuestLabel && needsProxySetup(settings, status, proxy);
   const network = connectionError
     ? { mode: "unknown", label: "外网状态待确认" }
@@ -473,6 +479,7 @@ function App() {
       createTerminal(status.workspace || "", "shell").catch((e) => notify(e.message));
       return;
     }
+    path ||= guestWorkspace;
     if (!path && system !== "windows-remote") { setProjectDialog({}); return; }
     setTerminalChoice((previous) =>
       previous?.anchor === anchor ? null : { path, anchor },
@@ -564,7 +571,7 @@ function App() {
       notify("此 Windows 云端环境的文件编辑器尚未接通。当前可在隔离 PowerShell 中操作文件。");
       return;
     }
-    if (!path) { setProjectDialog({}); return; }
+    if (!path || path === guestWorkspace) { setProjectDialog({}); return; }
     browserDismissed.current = false;
     setTailnetLogin(null);
     const result = await action("/browser/editor", { workspace: path });
@@ -1564,8 +1571,8 @@ function App() {
           <main className={`workspace ${split ? "workspace-split" : ""}`} ref={workspaceBox} hidden={Boolean(managementPage)}
             style={{ "--split-left": `${100 * (dualBrowser && nativeSplit?.fraction || 0.5)}%` }}>
             {dropSide && <div aria-hidden="true" className={`split-drop split-${dropSide}`}>{dropSide === "left" ? "放到左侧" : "放到右侧"}</div>}
-            {!storageRecovery && desktopOpen && macGuest && <MacOSAppWindow key="claude-desktop" uploads={desktopFiles.uploads} keyboard={status.keyboard} remoteRef={remote}
-              onStatus={notify} onFallback={(text, message) => setTransfer({ text, message })} visible={!settingsOpen && !managementPage} onConfirm={confirm}
+            {!storageRecovery && desktopOpen && macGuest && status.vm_running && <MacOSAppWindow key={`claude-desktop:${tabLayoutKey}`} ready={Boolean(status.ready)} uploads={desktopFiles.uploads} keyboard={status.keyboard} remoteRef={remote}
+              onStatus={notify} onWindowStatus={setMacWindowStatus} onFallback={(text, message) => setTransfer({ text, message })} visible={!settingsOpen && !managementPage} onConfirm={confirm}
               sidebarCollapsed={sidebarCollapsed} onExpand={() => persist("cage-sidebar-collapsed", false, setSidebarCollapsed)} />}
             {!storageRecovery && desktopOpen && !macGuest && <ClaudeDesktop
               uploads={desktopFiles.uploads}
@@ -1586,10 +1593,10 @@ function App() {
               <>
                 {macGuest && !desktopOpen && !showHome && webPanes.length > 0 && (
                   <section className={`pane-lane browser-lane split-${paneSide(webPanes[0].id)}`}>
-                    {status.ready && <MacOSAppWindow key="chrome" browser onOpenPage={openBrowserPage} visible={!settingsOpen} uploads={desktopFiles.uploads}
-                      keyboard={status.keyboard} remoteRef={remote} onStatus={notify}
+                    <MacOSAppWindow key={`chrome:${tabLayoutKey}:${liveBrowser?.id}`} ready={Boolean(status.ready)} browser onOpenPage={openBrowserPage} visible={!settingsOpen && !managementPage} uploads={desktopFiles.uploads}
+                       keyboard={status.keyboard} remoteRef={remote} onStatus={notify} onWindowStatus={setMacWindowStatus}
                       sidebarCollapsed={sidebarCollapsed} onExpand={() => persist("cage-sidebar-collapsed", false, setSidebarCollapsed)}
-                      onFallback={(text, message) => setTransfer({ text, message })} />}
+                      onFallback={(text, message) => setTransfer({ text, message })} />
                   </section>
                 )}
                 {!macGuest && !desktopOpen && !showHome && webPanes.length > 0 && (
@@ -1762,7 +1769,7 @@ function App() {
                               clone_key: guestSystem.clone_key,
                               editor_terms: guestSystem.editor_terms,
                             } : {});
-                          else if (!workspace && projectsAvailable)
+                          else if (!workspace && !guestWorkspace && projectsAvailable)
                             setProjectDialog({ path: "" });
                           else newTerminal(workspace, event.currentTarget);
                         }}
@@ -1775,7 +1782,7 @@ function App() {
                           <Power size={16} />
                         ) : !status.ready ? (
                           <RefreshCw size={16} />
-                        ) : !workspace && projectsAvailable ? (
+                        ) : !workspace && !guestWorkspace && projectsAvailable ? (
                           <FolderOpen size={16} />
                         ) : (
                           <TerminalSquare size={16} />
@@ -1789,6 +1796,8 @@ function App() {
                                 guestSystem && guestSystem.guest_system !== "debian-13" ? "安装客户机" : "启动 Cage 环境"
                             : !status.ready
                               ? "恢复浏览器"
+                              : !workspace && guestWorkspace
+                                ? "在客机工作区新建终端"
                               : !workspace && projectsAvailable
                                 ? "打开项目"
                                 : "新建终端"}
@@ -1804,12 +1813,12 @@ function App() {
                         新建终端
                       </button>
                       <button
-                        onClick={() => openEditor(contentWorkspace)}
-                        disabled={!status.ready || busy || !editorAvailable}
-                        title={editorAvailable ? undefined : "当前环境尚未接通文件编辑器，可使用 PowerShell 管理隔离工作目录中的文件"}
+                        onClick={() => showProjectPickerShortcut ? setProjectDialog({}) : openEditor(contentWorkspace)}
+                        disabled={!status.ready || busy || (showProjectPickerShortcut ? !projectsAvailable : !editorAvailable)}
+                        title={showProjectPickerShortcut || editorAvailable ? undefined : "当前环境尚未接通文件编辑器，可使用 PowerShell 管理隔离工作目录中的文件"}
                       >
-                        <FileCode2 size={16} />
-                        浏览文件
+                        {showProjectPickerShortcut ? <FolderOpen size={16} /> : <FileCode2 size={16} />}
+                        {showProjectPickerShortcut ? "打开本机项目" : "浏览文件"}
                       </button>
                     </div>
                   )}
@@ -1823,9 +1832,9 @@ function App() {
                   )}
                   {running && status.ready && (
                     <p className="welcome-hint">
-                      {status.guest_system === "windows-remote" ? "PowerShell 和浏览器无需 Claude 登录。只有使用 Claude 时才需要登录账户。" : <>打开项目后，在终端输入 <code>claude</code>，按提示登录你的账户。</>}
+                      {status.guest_system === "windows-remote" ? "PowerShell 和浏览器无需 Claude 登录。只有使用 Claude 时才需要登录账户。" : <>在终端输入 <code>claude</code>，按提示登录你的账户。</>}
                       <br />
-                      {status.guest_system === "windows-remote" ? "文件保存在云端隔离工作目录中，不会挂载你的本地文件夹。" : isRemoteClient() ? "打开的项目位于云端，编辑和删除会直接影响云端文件。" : "打开的项目与本机共享，编辑和删除文件会同步。"}
+                      {status.guest_system === "windows-remote" ? "文件保存在云端隔离工作目录中，不会挂载你的本地文件夹。" : isRemoteClient() ? "打开的项目位于云端，编辑和删除会直接影响云端文件。" : guestWorkspace && (!workspace || workspace === guestWorkspace) ? "客机工作区的文件保存在虚拟磁盘里，下次启动可以继续。需要共享文件夹时，点击「打开本机项目」。" : "本机项目按所选权限共享，可写目录中的修改会同步到本机。"}
                     </p>
                   )}
                   </>}
@@ -1914,8 +1923,8 @@ function App() {
             <span className="status-spacer" />
             <AudioControls audio={audio} />
             <EnvironmentClock timezone={settings.timezone} clock12Hour={settings.clock_12_hour} />
-            <span className="status-feedback" role="status">
-              <SafetyMessage message={toast ||
+            <span className="status-feedback" role="status" title={macWindowStatus || undefined}>
+              <SafetyMessage message={macWindowStatus || toast ||
                 (busy
                   ? status.job.message
                   : running

@@ -90,6 +90,7 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
   const [verify, setVerify] = useState(null), [accountPassword, setAccountPassword] = useState("");
   const [revealed, setRevealed] = useState(null), [error, setError] = useState(""), [message, setMessage] = useState("");
   const alive = useRef(true);
+  const revealGeneration = useRef(0);
   const refresh = async () => {
     const data = await api("/vault");
     if (alive.current) setStore(data);
@@ -97,7 +98,7 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
   useEffect(() => {
     alive.current = true;
     refresh().catch(error => { if (alive.current) setError(error.message); }).finally(() => { if (alive.current) setLoading(false); });
-    const clear = () => { setRevealed(null); setAccountPassword(""); };
+    const clear = () => { revealGeneration.current++; setRevealed(null); setAccountPassword(""); };
     window.addEventListener("blur", clear);
     document.addEventListener("visibilitychange", clear);
     return () => { alive.current = false; window.removeEventListener("blur", clear); document.removeEventListener("visibilitychange", clear); };
@@ -109,11 +110,13 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
     return () => clearTimeout(timer);
   }, [revealed]);
   const run = async (input, success) => {
+    const generation = revealGeneration.current;
     setBusy(true); setError(""); setMessage("");
     try {
       const result = await api("/vault", input);
       if (!alive.current) return;
       if (input.action === "reveal") {
+        if (generation !== revealGeneration.current) return;
         if (verify.mode === "copy") { await writeClipboard(result.password); setMessage("密码已复制到本机剪贴板"); }
         else setRevealed({ id: input.id, password: result.password });
         setVerify(null);
@@ -136,7 +139,7 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
       <fieldset disabled={busy}>
         <label>网站地址<input type="url" required autoFocus placeholder="https://mail.example.com" value={draft.origin} onChange={event => setDraft({ ...draft, origin: event.target.value })} /></label>
         <label>账号或邮箱<input autoComplete="off" maxLength={1024} value={draft.username} onChange={event => setDraft({ ...draft, username: event.target.value })} /></label>
-        <label>{draft.id ? "新密码（留空保留原密码）" : "网站密码"}<input type="password" autoComplete="new-password" required={!draft.id} maxLength={8192} value={draft.password || ""} onChange={event => setDraft({ ...draft, password: event.target.value })} /></label>
+        <label>{draft.id ? "网站密码（原网站可留空，更改网站时必填）" : "网站密码"}<input type="password" autoComplete="new-password" required={!draft.id} maxLength={8192} value={draft.password || ""} onChange={event => setDraft({ ...draft, password: event.target.value })} /></label>
         <div className="vault-actions"><button className="primary" type="submit">保存记录</button><button type="button" onClick={() => setDraft(null)}>取消</button></div>
       </fieldset>
     </form>}

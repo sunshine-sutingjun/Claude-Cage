@@ -21,7 +21,9 @@ const bootstrapJS = `(async()=>{try {
  const destination=new URLSearchParams(location.search).get("page")==="archived"?"/?page=archived":"/";
  const token=location.hash.slice(1); history.replaceState(null,"",location.pathname);
  const res=await fetch("/link-session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})});
- if (!res.ok) throw Error(); location.replace(destination);
+ if (!res.ok) throw Error();
+ const proof=res.headers.get("X-Cage-Mobile-Session"); if (!proof) throw Error();
+ sessionStorage.setItem("cage-mobile-session",proof); location.replace(destination);
 }catch{document.body.textContent="连接入口已失效，请使用本机新生成的入口。";}})();`
 
 type Browser struct {
@@ -30,6 +32,7 @@ type Browser struct {
 	launch    [32]byte
 	launchTTL time.Time
 	cookie    string
+	apiToken  string
 	root      *os.Root
 	api       http.Handler
 }
@@ -62,7 +65,7 @@ func NewBrowser(origin, directory string, client OperationClient) (browser *Brow
 		return nil, "", errors.New("build directory must contain mobile.html")
 	}
 	token := randomToken()
-	b := &Browser{origin: u, root: root, api: operations(client.Do), launch: sha256.Sum256([]byte(token)), launchTTL: time.Now().Add(2 * time.Minute), cookie: randomToken()}
+	b := &Browser{origin: u, root: root, api: operations(client.Do), launch: sha256.Sum256([]byte(token)), launchTTL: time.Now().Add(2 * time.Minute), cookie: randomToken(), apiToken: randomToken()}
 	return b, origin + "/link-bootstrap#" + token, nil
 }
 
@@ -111,6 +114,7 @@ func (b *Browser) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.SetCookie(w, &http.Cookie{Name: name, Value: b.cookie, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		w.Header().Set("X-Cage-Mobile-Session", b.apiToken)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -120,6 +124,13 @@ func (b *Browser) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
+		// Cookies are shared among ports on the same host. The tab keeps a
+		// separate API credential in storage scoped to its exact origin.
+		values := r.Header.Values("X-Cage-Mobile-Session")
+		if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte(b.apiToken)) != 1 {
+			http.Error(w, "open the private local launch file", http.StatusUnauthorized)
+			return
+		}
 		b.api.ServeHTTP(w, r)
 		return
 	}

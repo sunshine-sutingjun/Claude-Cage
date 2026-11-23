@@ -6,7 +6,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 )
 
-var physicalProxyInterface = managedproxy.PhysicalInterface
+var proxyTransportInterface = managedproxy.Store.TransportInterface
 
 // The lifecycle lock is held by monitorNetwork. Schedule a regular job so a
 // user stop can cancel recovery and pause can still revoke the gate immediately.
@@ -15,10 +15,14 @@ func (s *Server) monitorProxyInterface() {
 		return
 	}
 	cfg, err := loadConfig(s.configPath)
-	if err != nil || cfg.RequireManagedProxy(s.profile) != nil {
+	if err != nil {
 		return
 	}
-	name, err := physicalProxyInterface(s.lifetimeContext())
+	store, err := managedproxy.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision)
+	if err != nil {
+		return
+	}
+	name, err := proxyTransportInterface(store, s.lifetimeContext())
 	if err != nil {
 		_ = s.closeProxyGate(err.Error())
 		s.mu.Lock()
@@ -35,7 +39,7 @@ func (s *Server) monitorProxyInterface() {
 		return
 	}
 	// Revoke the previous report before the asynchronous recovery can start.
-	if err := s.closeProxyGate("物理网卡已变化，正在重新绑定代理并检查出口"); err != nil {
+	if err := s.closeProxyGate("上游网卡已变化，正在重新绑定代理并检查出口"); err != nil {
 		return
 	}
 	s.mu.Lock()
@@ -45,7 +49,7 @@ func (s *Server) monitorProxyInterface() {
 }
 
 func (s *Server) rebindProxyInterface() error {
-	s.setMessage("正在识别物理网卡并重新绑定代理…")
+	s.setMessage("正在识别上游网卡并重新绑定代理…")
 	cfg, err := loadConfig(s.configPath)
 	if err != nil {
 		return err

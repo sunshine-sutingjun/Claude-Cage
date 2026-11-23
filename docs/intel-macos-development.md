@@ -22,7 +22,7 @@ Intel 首次设置的文件系统步骤会先打开已校验的官方 macFUSE �
 
 ## 构建独立测试包
 
-需要 Xcode、Go（根模块要求 1.26.10，`tools/tailnet` 要求 1.27.3，均为最低版本）、Node.js、Python 3.11+、Meson、Ninja、pkg-config，以及源码构建所需的 gettext、pixman、libffi。GLib 和 PCRE2 由构建脚本从固定版本源码构建。依赖工具需在 `PATH` 中；Go 工具链的联网下载、离线准备与构建前检查见[macOS 源码构建说明](../.github/CONTRIBUTING.md#macos-源码构建)。
+需要 Xcode、Go（根模块要求 1.26.11，`tools/tailnet` 要求 1.27.4，均为最低版本）、Node.js、Python 3.11+、Meson、Ninja、pkg-config，以及源码构建所需的 gettext、pixman、libffi。GLib 和 PCRE2 由构建脚本从固定版本源码构建。依赖工具需在 `PATH` 中；Go 工具链的联网下载、离线准备与构建前检查见[macOS 源码构建说明](../.github/CONTRIBUTING.md#macos-源码构建)。
 
 ```sh
 bash scripts/build-app.sh --intel-macos-test

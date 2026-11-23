@@ -68,8 +68,8 @@ func TestBuildBash(t *testing.T) {
 			if strings.ReplaceAll(warn.String(), gs.root, "ROOT") != strings.ReplaceAll(r.Stderr, bs.root, "ROOT") {
 				t.Errorf("warnings: %q, bash %q", warn.String(), r.Stderr)
 			}
-			if fi, err := os.Stat(gs.state + "/file-mounts/t-00000000/0/file.txt"); err != nil || !fi.Mode().IsRegular() {
-				t.Error("the file was not staged")
+			if _, err := os.Stat(gs.state + "/file-mounts/t-00000000/0/file.txt"); !os.IsNotExist(err) {
+				t.Error("planning changed the live staging directory")
 			}
 		}
 	}

@@ -75,6 +75,9 @@ func AcceptPair(ctx context.Context, p PairCode, hostToken string, host *remotel
 	if err != nil {
 		return err
 	}
+	expires := time.Unix(p.Expires, 0)
+	ctx, cancel := context.WithDeadline(ctx, expires)
+	defer cancel()
 	ws, err := join(ctx, p.origin(), p.Room, "host", hostToken)
 	if err != nil {
 		return err
@@ -87,6 +90,9 @@ func AcceptPair(ctx context.Context, p PairCode, hostToken string, host *remotel
 	var pin string
 	if err = json.NewDecoder(io.LimitReader(conn, 256)).Decode(&pin); err != nil || !pairPin(pin) {
 		return errors.New("手机身份无效")
+	}
+	if ctx.Err() != nil || !time.Now().Before(expires) {
+		return errors.New("配对已结束")
 	}
 	record, err := save(pin)
 	if err != nil {

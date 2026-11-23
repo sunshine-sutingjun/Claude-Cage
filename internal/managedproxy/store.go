@@ -43,14 +43,15 @@ type Source struct {
 	Skipped   []NodeIssue `json:"skipped,omitempty"`
 }
 type Store struct {
-	Version      int                          `json:"version"`
-	Port         int                          `json:"port"`
-	Auth         string                       `json:"auth"`
-	Revision     string                       `json:"revision"`
-	Selected     string                       `json:"selected"`
-	Chain        []string                     `json:"chain,omitempty"`
-	Sources      []Source                     `json:"sources"`
-	ExitPolicies map[string]exitpolicy.Policy `json:"exit_policies,omitempty"`
+	FirstHopViaHostTunnel bool                         `json:"first_hop_via_host_tunnel,omitempty"`
+	Version               int                          `json:"version"`
+	Port                  int                          `json:"port"`
+	Auth                  string                       `json:"auth"`
+	Revision              string                       `json:"revision"`
+	Selected              string                       `json:"selected"`
+	Chain                 []string                     `json:"chain,omitempty"`
+	Sources               []Source                     `json:"sources"`
+	ExitPolicies          map[string]exitpolicy.Policy `json:"exit_policies,omitempty"`
 }
 
 func Token() string {

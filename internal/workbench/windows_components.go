@@ -69,6 +69,7 @@ func (s *Server) refreshWindowsComponents() {
 		s.windowsState.Components = report.Components
 		s.windowsState.Capabilities = report.Capabilities
 		s.windowsState.Browser = report.Browser
+		s.windowsState.GuestWorkspace = report.GuestWorkspace
 		s.windowsState.Available, s.windowsState.Reason, s.windowsState.Session = report.Available, report.Reason, report.Session
 	}()
 }

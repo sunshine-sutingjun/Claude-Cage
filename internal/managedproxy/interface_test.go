@@ -81,3 +81,44 @@ func TestBindingPreservesProxyChainAndReplacesStaleNodeBinding(t *testing.T) {
 		t.Fatal("unbound fallback accepted")
 	}
 }
+
+func TestTunnelFirstHopUsesAppliedRoute(t *testing.T) {
+	node := func(id, protocol, server string) Node {
+		return Node{ID: id, Config: map[string]any{"name": id, "type": protocol, "server": server}}
+	}
+	entry := node("entry", "socks5", "203.0.113.1")
+	exit := node("exit", "http", "example.com")
+	exit.Config["dialer-proxy"] = "entry"
+	store := Store{Selected: "exit", Sources: []Source{{Nodes: []Node{entry, exit}}}}
+	for _, chain := range [][]string{nil, {"entry", "exit"}} {
+		store.Chain = chain
+		if got, err := store.tunnelFirstHop(); err != nil || got.String() != "203.0.113.1" {
+			t.Fatalf("first hop: %v, %v", got, err)
+		}
+	}
+	for _, server := range []string{"localhost", "example.com", "127.0.0.1", "192.168.1.42", "198.18.0.1", "::1", "::ffff:1.1.1.1"} {
+		entry.Config["server"] = server
+		if _, err := store.tunnelFirstHop(); err == nil {
+			t.Errorf("accepted first hop %s", server)
+		}
+	}
+	store.Chain = []string{"exit"}
+	exit.Config["server"] = "203.0.113.2"
+	if _, err := store.tunnelFirstHop(); err == nil {
+		t.Fatal("accepted an HTTP first hop")
+	}
+}
+
+func TestTunnelRouteRequiresActiveMacOSTunnel(t *testing.T) {
+	for _, tc := range []struct{ name, flags, want string }{
+		{"utun1", "<UP,DONE,CLONING,STATIC,GLOBAL>", "utun1"},
+		{"en0", "<UP>", ""}, {"lo0", "<UP>", ""}, {"vmenet1", "<UP>", ""}, {"utunX", "<UP>", ""},
+		{"utun1", "<DONE>", ""}, {"utun1", "<UP,REJECT>", ""}, {"utun1", "<BLACKHOLE,UP>", ""},
+	} {
+		route := "  interface: " + tc.name + "\n      flags: " + tc.flags + "\n"
+		name, err := tunnelRouteInterface(route)
+		if name != tc.want || (err != nil) != (tc.want == "") {
+			t.Fatalf("%q: interface=%q err=%v", route, name, err)
+		}
+	}
+}

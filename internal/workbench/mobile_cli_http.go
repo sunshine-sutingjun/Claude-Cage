@@ -213,12 +213,15 @@ func (s *Server) mobileProjects(w http.ResponseWriter, r *http.Request) {
 	for _, group := range groups {
 		projects = append(projects, map[string]any{"path": group.Workspace, "name": group.Name, "folders": group.Folders})
 	}
+	if s.guestWorkspaceAvailable() {
+		projects = append(projects, map[string]any{"path": guestWorkspaceID, "name": "客机工作区", "folders": []string{guestWorkspaceID}})
+	}
 	s.mu.Lock()
 	ready := s.ready && !s.closing
 	shared := sharedCLILauncher(claudeTerminalCommand(s.preferences))
 	if s.windowsGuest != nil {
 		available := s.windowsCapabilitiesLocked()["available"].(map[string]bool)
-		shared = shared && available["cli"] && available["terminal"] && available["projects"]
+		shared = shared && available["cli"] && available["terminal"] && (available["projects"] || s.windowsState.GuestWorkspace != "")
 	}
 	s.mu.Unlock()
 	name, _ := os.Hostname()
@@ -231,6 +234,9 @@ func (s *Server) mobileSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	granted := map[string]bool{}
+	if s.guestWorkspaceAvailable() {
+		paths = append(paths, guestWorkspaceID)
+	}
 	for _, path := range paths {
 		granted[path] = true
 	}
@@ -273,7 +279,7 @@ func (s *Server) mobileNewSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "需要项目和有效的创建编号", 400)
 		return
 	}
-	workspace, err := s.projectWorkspace(input.Workspace)
+	workspace, err := s.sessionWorkspace(input.Workspace)
 	if err != nil {
 		http.Error(w, "项目未授权或已不可用", 403)
 		return
@@ -356,7 +362,7 @@ func (s *Server) authorizedMobileSessionRecord(w http.ResponseWriter, r *http.Re
 		http.Error(w, "无法读取主机上的 CLI 会话记录", 500)
 		return view, false, false
 	}
-	if _, err := s.projectWorkspace(view.Workspace); err != nil {
+	if _, err := s.sessionWorkspace(view.Workspace); err != nil {
 		http.Error(w, "项目未授权或已不可用", 403)
 		return view, false, false
 	}

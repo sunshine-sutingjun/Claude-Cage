@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -31,7 +30,7 @@ type bufferedProjectOutput struct {
 	io.Closer
 }
 
-func startWindowsProjectTransport(cmd *exec.Cmd, hostPath string, binding windowsProjectBinding) (*projectShare, error) {
+func startWindowsProjectTransport(cmd *exec.Cmd, hostPath string, binding windowsProjectBinding, probe *reversesshfs.ProjectMountProbe) (*projectShare, error) {
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -84,13 +83,8 @@ func startWindowsProjectTransport(cmd *exec.Cmd, hostPath string, binding window
 	}
 	admitted = true
 	binding.Path = started.Path
-	share := &projectShare{cmd: cmd, transport: projectTransport{bufferedProjectOutput{reader, output}, input}, done: make(chan struct{}), windowsProject: &binding}
-	go func() {
-		defer close(share.done)
-		_ = reversesshfs.ServeConfinedVirtual(share.transport, hostPath, false, nil)
-		share.stop()
-		_ = cmd.Wait()
-	}()
+	share := &projectShare{cmd: cmd, transport: projectTransport{bufferedProjectOutput{reader, output}, input}, done: make(chan struct{}), windowsProject: &binding, probe: probe}
+	go share.serve(hostPath, true)
 	return share, nil
 }
 func validWindowsProjectPath(path, id string) bool {
@@ -119,7 +113,7 @@ func (s *Server) windowsProjectRequest(ctx context.Context, action string, bindi
 	}
 	return result, nil
 }
-func (s *Server) ensureWindowsProjectShare(hostPath string) error {
+func (s *Server) ensureWindowsProjectShare(hostPath string, readonly bool) error {
 	s.mu.Lock()
 	current := s.projectShares[hostPath]
 	s.mu.Unlock()
@@ -131,25 +125,21 @@ func (s *Server) ensureWindowsProjectShare(hostPath string) error {
 			return nil
 		}
 	}
-	probe, err := os.CreateTemp(hostPath, ".cage-mount-probe-*")
+	var probe *reversesshfs.ProjectMountProbe
+	if readonly {
+		probe = newProjectMountProbe()
+	}
+	probeName, challenge, cleanup, err := prepareProjectMountProbe(hostPath, probe)
 	if err != nil {
-		return errors.New("无法验证项目目录读写权限")
-	}
-	defer os.Remove(probe.Name())
-	challenge := randomToken()
-	if _, err = probe.WriteString(challenge); err != nil {
-		probe.Close()
 		return err
 	}
-	if err = probe.Close(); err != nil {
-		return err
-	}
+	defer cleanup()
 	binding := windowsProjectIdentity(s.profile, hostPath)
 	cmd, err := guestos.WindowsRelayCommand(s.lifetimeContext(), s.profile, "project-mount")
 	if err != nil {
 		return err
 	}
-	share, err := startWindowsProjectTransport(cmd, hostPath, binding)
+	share, err := startWindowsProjectTransport(cmd, hostPath, binding, probe)
 	if err != nil {
 		return err
 	}
@@ -162,7 +152,7 @@ func (s *Server) ensureWindowsProjectShare(hostPath string) error {
 	ctx, cancel := context.WithTimeout(s.operationContext(), 15*time.Second)
 	defer cancel()
 	for {
-		result, probeErr := s.windowsProjectRequest(ctx, "probe", *share.windowsProject, filepath.Base(probe.Name()))
+		result, probeErr := s.windowsProjectRequest(ctx, "probe", *share.windowsProject, probeName)
 		if probeErr == nil && result["mounted"] == true && result["id"] == binding.ID && result["path"] == share.windowsProject.Path && result["proof"] == challenge {
 			break
 		}

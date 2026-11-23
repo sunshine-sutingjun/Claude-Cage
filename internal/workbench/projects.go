@@ -131,6 +131,42 @@ type projectShare struct {
 	approvalTimer  *time.Timer
 	windowsProject *windowsProjectBinding
 	stderr         *fileControlStderr
+	probe          *reversesshfs.ProjectMountProbe
+}
+
+func newProjectMountProbe() *reversesshfs.ProjectMountProbe {
+	return &reversesshfs.ProjectMountProbe{Filename: ".cage-mount-probe-" + randomToken(), Challenge: randomToken()}
+}
+
+func prepareProjectMountProbe(hostPath string, probe *reversesshfs.ProjectMountProbe) (name, challenge string, cleanup func(), err error) {
+	if probe != nil {
+		return probe.Filename, probe.Challenge, func() {}, nil
+	}
+	file, err := os.CreateTemp(hostPath, ".cage-mount-probe-*")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("无法验证项目目录的读写权限：%w", err)
+	}
+	cleanup = func() { _ = os.Remove(file.Name()) }
+	challenge = randomToken()
+	_, writeErr := file.WriteString(challenge)
+	if err = errors.Join(writeErr, file.Close()); err != nil {
+		cleanup()
+		return "", "", nil, err
+	}
+	return filepath.Base(file.Name()), challenge, cleanup, nil
+}
+
+func (p *projectShare) serve(hostPath string, virtualRoot bool) {
+	defer close(p.done)
+	if p.probe != nil {
+		_ = reversesshfs.ServeReadOnlyProject(p.transport, hostPath, virtualRoot, *p.probe)
+	} else if virtualRoot {
+		_ = reversesshfs.ServeConfinedVirtual(p.transport, hostPath, false, nil)
+	} else {
+		_ = reversesshfs.ServeConfined(p.transport, hostPath, false, nil)
+	}
+	p.stop()
+	_ = p.cmd.Wait()
 }
 
 func (p *projectShare) stop() {
@@ -159,7 +195,7 @@ func (p *projectShare) close() {
 
 // The local SFTP server owns the host authorization boundary for both macOS
 // and Linux mounts. The remote shell receives only that directory's byte stream.
-func startProjectTransport(cmd *exec.Cmd, path string) (*projectShare, error) {
+func startProjectTransport(cmd *exec.Cmd, path string, probe *reversesshfs.ProjectMountProbe) (*projectShare, error) {
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -169,23 +205,32 @@ func startProjectTransport(cmd *exec.Cmd, path string) (*projectShare, error) {
 		_ = output.Close()
 		return nil, err
 	}
-	share := &projectShare{cmd: cmd, transport: projectTransport{output, input}, done: make(chan struct{})}
+	share := &projectShare{cmd: cmd, transport: projectTransport{output, input}, done: make(chan struct{}), probe: probe}
 	if err = cmd.Start(); err != nil {
 		_ = share.transport.Close()
 		return nil, err
 	}
-	go func() {
-		defer close(share.done)
-		_ = reversesshfs.ServeConfined(share.transport, path, false, nil)
-		share.stop()
-		_ = cmd.Wait()
-	}()
+	go share.serve(path, false)
 	return share, nil
 }
 
 // Called under the lifecycle lock. Each SFTP server is rooted in exactly the
 // directory the user opened; switching projects keeps existing mounts alive.
-func (s *Server) ensureProjectShare(path string) (returned error) {
+func (s *Server) ensureProjectShare(path string) error {
+	saved, err := s.readSharedProjects()
+	if err != nil {
+		return err
+	}
+	mode := saved.folderMode(path)
+	grants := s.projectFolderModes(saved)
+	s.includePendingProjectFolderModes(grants)
+	if err := s.checkProjectFolderMode(path, mode, grants); err != nil {
+		return err
+	}
+	return s.ensureProjectShareMode(path, mode)
+}
+
+func (s *Server) ensureProjectShareMode(path string, mode projectFolderMode) (returned error) {
 	s.mu.Lock()
 	closing := s.closing
 	s.mu.Unlock()
@@ -204,19 +249,34 @@ func (s *Server) ensureProjectShare(path string) (returned error) {
 		}
 		s.setProjectError(path, returned)
 	}()
+	readonly := mode == projectFolderRead
+	s.mu.Lock()
+	current := s.projectShares[path]
+	s.mu.Unlock()
+	if current != nil && (current.probe != nil) != readonly {
+		s.detachProjectFolders([]string{path})
+		current = nil
+	}
 	if s.windowsGuest != nil {
-		return s.ensureWindowsProjectShare(path)
+		return s.ensureWindowsProjectShare(path, readonly)
 	}
 	if s.macosGuest != nil {
-		return s.ensureMacOSProjectShare(path)
+		return s.ensureMacOSProjectShare(path, readonly)
+	}
+	if s.guestWorkspaceAvailable() {
+		local := s.guestWorkspacePath()
+		if local == "" {
+			return errors.New("无法核对客机工作区，请检查环境配置后重试")
+		}
+		target := guestPath(path)
+		if cliWorkspaceWithin(target, local, false) || cliWorkspaceWithin(local, target, false) {
+			return errors.New("这个共享目录会覆盖客机工作区，请选择其他项目目录")
+		}
 	}
 	if path == s.environmentDir() {
 		return nil
 	}
 
-	s.mu.Lock()
-	current := s.projectShares[path]
-	s.mu.Unlock()
 	if current != nil {
 		select {
 		case <-current.done:
@@ -230,22 +290,23 @@ func (s *Server) ensureProjectShare(path string) (returned error) {
 	quoted := shellescape.Quote(guestPath(path))
 	// Stale FUSE mounts can remain after a control-service restart. Only reconnect
 	// this explicitly authorized path, without changing other projects' mounts.
-	if _, err = s.guest(ctx, "if mountpoint -q "+quoted+"; then fusermount3 -uz "+quoted+"; fi; sudo mkdir -p "+quoted+" && sudo chown \"$(id -u):$(id -g)\" "+quoted); err != nil {
+	owner := "sudo chown \"$(id -u):$(id -g)\" " + quoted
+	if readonly {
+		// A same-mode parent mount already presents the directory as guest-owned.
+		owner = "(test -O " + quoted + " || " + owner + ")"
+	}
+	if _, err = s.guest(ctx, "if mountpoint -q "+quoted+"; then fusermount3 -uz "+quoted+"; fi; sudo mkdir -p "+quoted+" && "+owner); err != nil {
 		return errors.New("无法在 Cage 中准备项目目录")
 	}
-	probe, err := os.CreateTemp(path, ".cage-mount-probe-*")
+	var probe *reversesshfs.ProjectMountProbe
+	if readonly {
+		probe = newProjectMountProbe()
+	}
+	probeName, challenge, cleanup, err := prepareProjectMountProbe(path, probe)
 	if err != nil {
-		return fmt.Errorf("无法验证项目目录的读写权限：%w", err)
-	}
-	defer os.Remove(probe.Name())
-	challenge := randomToken()
-	if _, err = probe.WriteString(challenge); err != nil {
-		_ = probe.Close()
 		return err
 	}
-	if err = probe.Close(); err != nil {
-		return err
-	}
+	defer cleanup()
 	// Present shared files as owned by the guest user. Host UID/GID values differ
 	// across platforms and otherwise make Git reject an explicitly shared repo.
 	s.mu.Lock()
@@ -253,12 +314,12 @@ func (s *Server) ensureProjectShare(path string) (returned error) {
 	s.mu.Unlock()
 	script := "exec sshfs " + shellescape.Quote(":"+filepath.ToSlash(path)) + " " + quoted + " -o " + projectShareOptions(cache)
 	cmd := s.sshCommand(s.lifetimeContext(), "-T", s.sshTarget(), "--", script)
-	share, err := startProjectTransport(cmd, path)
+	share, err := startProjectTransport(cmd, path, probe)
 	if err != nil {
 		return err
 	}
 	for {
-		if _, err = s.guest(ctx, "mountpoint -q "+quoted+" && test \"$(cat "+shellescape.Quote(guestPath(probe.Name()))+")\" = "+shellescape.Quote(challenge)); err == nil {
+		if _, err = s.guest(ctx, "mountpoint -q "+quoted+" && test \"$(cat "+shellescape.Quote(guestPath(filepath.Join(path, probeName)))+")\" = "+shellescape.Quote(challenge)); err == nil {
 			break
 		}
 		select {
@@ -369,14 +430,14 @@ func (s *Server) setProjectError(path string, err error) {
 // The saved directory grants are the project list. Retain a legacy current
 // selection as an ordinary project, without granting the transfer directory.
 func (s *Server) projectPaths() ([]string, error) {
-	var saved sharedProjects
-	if b, err := os.ReadFile(filepath.Join(s.profile, "projects.json")); err == nil {
-		if err = json.Unmarshal(b, &saved); err != nil {
-			return nil, err
-		}
-	} else if !os.IsNotExist(err) {
+	saved, err := s.readSharedProjects()
+	if err != nil {
 		return nil, err
 	}
+	return s.projectPathsFromSaved(saved), nil
+}
+
+func (s *Server) projectPathsFromSaved(saved sharedProjects) []string {
 	paths := []string{}
 	s.mu.Lock()
 	current := s.preferences.Workspace
@@ -390,7 +451,7 @@ func (s *Server) projectPaths() ([]string, error) {
 			paths = append(paths, path)
 		}
 	}
-	return s.appendClientMounts(paths), nil
+	return s.appendClientMounts(paths)
 }
 
 func (s *Server) projectWorkspace(path string) (string, error) {
@@ -460,6 +521,7 @@ func (s *Server) restoreProjectShares() {
 }
 func (s *Server) closeProjectShares() {
 	s.closeClientMounts()
+	s.swapPendingProjectGroup(nil)
 	s.mu.Lock()
 	shares := s.projectShares
 	s.projectShares = nil

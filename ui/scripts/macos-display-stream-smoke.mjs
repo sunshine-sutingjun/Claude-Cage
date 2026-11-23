@@ -40,11 +40,12 @@ const { page, browser, errors } = await createWorkbench({
 });
 try {
   await page.getByRole("button", { name: "Claude Desktop", exact: true }).click();
-  await page.locator(".mac-claude-frame img").waitFor();
-  await page.waitForFunction(() => document.querySelector(".mac-claude-frame img")?.naturalWidth === 800);
-  await page.locator(".mac-claude-frame img").click();
+  await page.locator(".mac-claude-frame canvas").waitFor();
+  await page.waitForFunction(() => document.querySelector(".mac-claude-frame canvas")?.width === 800);
+  await page.locator(".mac-claude-frame canvas").click();
   await page.locator(".mac-claude-typing").press("ArrowRight");
-  assert(actions.includes("click") && actions.includes("key"));
+  for (let i = 0; i < 100 && !actions.includes("key"); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert(actions.includes("pointer") && actions.includes("key"));
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(images, 1, "static frames must keep their existing decoded image");
   await page.evaluate(() => { window.cageWindowVisible = false; window.dispatchEvent(new Event("cage-window-visibility")); });
@@ -54,7 +55,7 @@ try {
   assert.equal(requests, hiddenRequests, "hidden windows must stop requesting frames");
   assert.equal(closed, 1);
   await page.evaluate(() => { window.cageWindowVisible = true; window.dispatchEvent(new Event("cage-window-visibility")); });
-  await page.waitForFunction(() => document.querySelector(".mac-claude-frame img")?.naturalWidth === 800);
+  await page.waitForFunction(() => document.querySelector(".mac-claude-frame canvas")?.width === 800);
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(images, 2, "restoring a window must request a fresh frame");
   assert.deepEqual(errors, []);

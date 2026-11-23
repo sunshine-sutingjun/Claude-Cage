@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-type DesktopOptions struct{ CompleteUpdate, UseExisting bool }
+type DesktopOptions struct{ CompleteUpdate, UseExisting, NativeDevice bool }
 type DesktopResult struct {
 	Status     string             `json:"status"`
 	URL        string             `json:"url,omitempty"`
@@ -207,6 +207,22 @@ func pendingUpdate(c *controllerClient) DesktopResult {
 	return DesktopResult{Status: "upgrade_pending", Legacy: c.launch.Controller.Protocol == 0, Controller: c.launch.Controller, Message: "新版已准备好，当前后台仍在运行。请先打开现有环境保存文件，再选择“保存后停止环境并完成更新”。终端任务会结束，项目和登录状态会保留。"}
 }
 
+func (c *controllerClient) desktopResult(status string, nativeDevice bool) (DesktopResult, error) {
+	result := DesktopResult{Status: status, URL: c.launch.URL, Controller: c.launch.Controller, Legacy: c.launch.Controller.Protocol == 0}
+	if nativeDevice {
+		if !c.launch.DeviceSessions {
+			return DesktopResult{}, errors.New("请更新 Cage 后再设置快捷登录")
+		}
+		entry, err := url.Parse(c.launch.URL)
+		if err != nil || entry.Fragment == "" {
+			return DesktopResult{}, errors.New("桌面连接入口无效")
+		}
+		entry.Fragment = deviceTicket(c.record.Token, entry.Fragment)
+		result.URL = entry.String()
+	}
+	return result, nil
+}
+
 // Desktop never silently loads a different build's UI. Completing an update is
 // an explicit user action because it stops the existing environment's work.
 func Desktop(configPath string, options DesktopOptions) (DesktopResult, error) {
@@ -240,7 +256,7 @@ func desktopLaunch(profile string, gateway bool, options DesktopOptions, start f
 			if !want.matches(current.launch.Controller) {
 				status = "existing"
 			}
-			return DesktopResult{Status: status, URL: current.launch.URL, Controller: current.launch.Controller, Legacy: current.launch.Controller.Protocol == 0}, nil
+			return current.desktopResult(status, options.NativeDevice)
 		} else {
 			if current.launch.Controller.Protocol != controlProtocol {
 				return pendingUpdate(current), nil
@@ -270,7 +286,7 @@ func desktopLaunch(profile string, gateway bool, options DesktopOptions, start f
 				return DesktopResult{}, errors.New("打开期间控制服务身份发生变化，请重新选择")
 			}
 			if want.matches(c.launch.Controller) {
-				return DesktopResult{Status: "ready", URL: c.launch.URL, Controller: c.launch.Controller}, nil
+				return c.desktopResult("ready", options.NativeDevice)
 			}
 			return pendingUpdate(c), nil
 		}

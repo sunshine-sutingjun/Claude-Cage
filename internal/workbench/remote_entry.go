@@ -116,6 +116,9 @@ func ServerEntry(configPath string) (RemoteEntry, error) {
 		return RemoteEntry{}, errors.New("云端入口无效")
 	}
 	result.Ticket = u.Fragment
+	if launch.DeviceSessions {
+		result.Ticket = deviceTicket(c.record.Token, result.Ticket)
+	}
 	if result.Platform == "windows" && result.Runtime == "windows-remote" {
 		result.RemoteView = remoteViewProof(c.record.Token)
 	}

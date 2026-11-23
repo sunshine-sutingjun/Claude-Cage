@@ -397,7 +397,7 @@ func (s *Server) startEnvironment(syncTimezone bool) error {
 		if p.Selected == "" || p.Endpoint() != cfg.ProxyURL || p.Revision != cfg.ProxyRevision {
 			return errors.New("内置代理配置未应用，请重新选择节点")
 		}
-		name, e := physicalProxyInterface(s.operationContext())
+		name, e := proxyTransportInterface(p, s.operationContext())
 		if e != nil {
 			_ = s.closeProxyGate(e.Error())
 			return e

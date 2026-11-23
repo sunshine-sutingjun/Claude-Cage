@@ -16,6 +16,10 @@ export function createMacFrameConnection(onFrame, onError, base = "/macos/claude
     close();
     onError(reason);
   };
+  const configure = viewport => {
+    configuration = { ...viewport, revision: ++revision };
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(configuration));
+  };
   socket.addEventListener("open", () => {
     if (configuration) socket.send(JSON.stringify(configuration));
   });
@@ -37,8 +41,9 @@ export function createMacFrameConnection(onFrame, onError, base = "/macos/claude
       urls.add(src);
       latestURL = src;
       let acknowledged = false;
-      onFrame({ ...header, src, acknowledge() {
-        if (closed || acknowledged || latestURL !== src) return;
+      const isCurrent = () => !closed && latestURL === src && revision === header.revision;
+      onFrame({ ...header, src, isCurrent, acknowledge() {
+        if (acknowledged || !isCurrent()) return;
         acknowledged = true;
         for (const previous of urls) {
           if (previous !== src) { URL.revokeObjectURL(previous); urls.delete(previous); }
@@ -54,9 +59,9 @@ export function createMacFrameConnection(onFrame, onError, base = "/macos/claude
       const key = JSON.stringify(next);
       if (key === size) return;
       size = key;
-      configuration = { ...next, revision: ++revision };
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(configuration));
+      configure(next);
     },
+    refresh() { if (!closed && configuration) configure(configuration); },
     close,
   };
 }

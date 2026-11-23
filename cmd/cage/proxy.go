@@ -21,7 +21,7 @@ func proxyCommand(command, profile string, cfg cage.Config) error {
 	if err != nil {
 		return err
 	}
-	name, err := managedproxy.PhysicalInterface(context.Background())
+	name, err := p.TransportInterface(context.Background())
 	if err != nil {
 		_ = closeManagedGates(profile)
 		return err

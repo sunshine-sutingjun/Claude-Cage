@@ -4,6 +4,8 @@ import { httpErrorMessage, connectionErrorMessage } from "../error-message.mjs";
 // native phone bridge serves its UI at / and authenticates its own peer.
 const desktopConnection = location.pathname === "/mobile.html"
   ? sessionStorage.getItem("cage-cli-local-connection") : null;
+const mobileSession = location.protocol === "http:"
+  ? sessionStorage.getItem("cage-mobile-session") : null;
 
 async function requestAPI(path, { body, signal, keepalive } = {}) {
   let response;
@@ -14,6 +16,7 @@ async function requestAPI(path, { body, signal, keepalive } = {}) {
       credentials: "same-origin",
       cache: "no-store",
       headers: { ...(desktopConnection ? { "X-Cage-Connection": desktopConnection } : {}),
+        ...(mobileSession ? { "X-Cage-Mobile-Session": mobileSession } : {}),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,

@@ -118,6 +118,13 @@ func TestChecksumListMustAgreeAndBelongToSameRelease(t *testing.T) {
 			t.Fatal("invalid list passed")
 		}
 	}
+	c.Checksums.Digest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(valid)))
+	if _, err := releaseDigest(context.Background(), responseClient(valid, 200), c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseDigest(context.Background(), responseClient(valid+"\n", 200), c); err == nil {
+		t.Fatal("accepted manifest inconsistent with published digest")
+	}
 	c.Checksums.URL = "https://github.com/" + repository + "/releases/download/v0.1.0/SHA256SUMS"
 	if _, err := releaseDigest(context.Background(), responseClient(valid, 200), c); err == nil {
 		t.Fatal("cross-version list passed")

@@ -32,11 +32,15 @@ export function parseArgs(args) {
   return options;
 }
 
-// Validate HTTPS at every redirect; do not use browser credentials or tokens.
 export async function httpsResponse(url, fetchImpl = fetch) {
+  const source = new URL(url);
+  const metadata = source.origin === 'https://api.github.com' && source.pathname.startsWith(`/repos/${repo}/releases/`);
+  const asset = source.origin === 'https://github.com' && source.pathname.startsWith(`/${repo}/releases/download/`);
   for (let redirects = 0; redirects <= 5; redirects++) {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) fail('unsafe_download', 'Only public HTTPS downloads without embedded credentials are supported.');
+    const trusted = redirects === 0 ? metadata || asset : asset &&
+      ['https://release-assets.githubusercontent.com', 'https://objects.githubusercontent.com'].includes(parsed.origin);
+    if (!trusted || parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) fail('unsafe_download', 'Download URL is outside the expected GitHub release source.');
     let response;
     try {
       response = await fetchImpl(parsed, { redirect: 'manual', signal: AbortSignal.timeout(120000), headers: { 'User-Agent': 'Cage-Agent-Bootstrap/1', Accept: 'application/json, application/octet-stream' } });
@@ -56,11 +60,11 @@ export async function httpsResponse(url, fetchImpl = fetch) {
   fail('download_failed', 'Too many redirects.');
 }
 
-async function boundedText(url, fetchImpl) {
+async function boundedBytes(url, fetchImpl, limit) {
   const response = await httpsResponse(url, fetchImpl);
   const chunks = []; let total = 0;
-  for await (const chunk of response.body) { total += chunk.length; if (total > 4 * 1024 * 1024) fail('invalid_release', 'Release metadata is too large.'); chunks.push(chunk); }
-  return Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '');
+  for await (const chunk of response.body) { total += chunk.length; if (total > limit) fail('invalid_release', 'Release metadata is too large.'); chunks.push(chunk); }
+  return Buffer.concat(chunks);
 }
 
 export function selectAsset(release, options) {
@@ -77,7 +81,7 @@ export function selectAsset(release, options) {
   }
   const sums = release.assets?.find(a => a.name === 'SHA256SUMS');
   if (!asset || !sums) fail('asset_unavailable', 'This release has no matching package and checksum manifest. Choose a published release containing both.');
-  if (!Number.isSafeInteger(asset.size) || asset.size <= 0) fail('invalid_release', 'The package has no valid published size.');
+  if (!Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 2 * 1024 ** 3) fail('invalid_release', 'The package has no valid published size.');
   for (const item of [asset, sums]) {
     if (item.browser_download_url !== `https://github.com/${repo}/releases/download/${tag}/${item.name}`) fail('invalid_release', 'Unexpected release asset origin.');
   }
@@ -90,12 +94,19 @@ export function checksumFor(manifest, name) {
   return matches[0][1].toLowerCase();
 }
 
+function verifyPublishedDigest(asset, digest) {
+  if (asset.digest != null && asset.digest !== `sha256:${digest}`) fail('checksum_mismatch', 'SHA-256 does not match the digest published in release metadata.');
+}
+
 export async function makePlan(options, fetchImpl = fetch) {
   const releaseURL = `https://api.github.com/repos/${repo}/releases/${options.version ? `tags/${options.version}` : 'latest'}`;
   let release;
-  try { release = JSON.parse(await boundedText(releaseURL, fetchImpl)); } catch (error) { if (error instanceof BootstrapError) throw error; fail('invalid_release', 'Could not read public release metadata.'); }
+  try { release = JSON.parse(new TextDecoder().decode(await boundedBytes(releaseURL, fetchImpl, 4 * 1024 * 1024))); } catch (error) { if (error instanceof BootstrapError) throw error; fail('invalid_release', 'Could not read public release metadata.'); }
   const selected = selectAsset(release, options);
-  const sha256 = checksumFor(await boundedText(selected.sums.browser_download_url, fetchImpl), selected.asset.name);
+  const manifest = await boundedBytes(selected.sums.browser_download_url, fetchImpl, 64 * 1024);
+  verifyPublishedDigest(selected.sums, createHash('sha256').update(manifest).digest('hex'));
+  const sha256 = checksumFor(new TextDecoder().decode(manifest), selected.asset.name);
+  verifyPublishedDigest(selected.asset, sha256);
   const cli = { 'darwin-arm64': '/Applications/Cage.app/Contents/Resources/cage', 'linux-amd64': '/usr/bin/claude-cage', 'win32-amd64': '%LOCALAPPDATA%\\Programs\\Cage\\resources\\cage.exe' }[options.platform];
   const installation = {
     'darwin-arm64': { guide: 'https://claude-cage.com/docs/installation/', steps: ['Check codesign and spctl on the mounted Cage.app. Preserve macOS Gatekeeper checks.', 'For an update, save work and stop Cage through its existing UI before replacing app files.', 'Mount the verified DMG read-only with hdiutil attach -readonly -nobrowse. Copy Cage.app to /Applications using the existing installation guide; eject the mounted volume.', 'Run the installed CLI agent capabilities. If agent is unknown, this release predates Agent support; use its documented UI or an authorized newer build.'] },

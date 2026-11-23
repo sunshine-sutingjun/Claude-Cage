@@ -61,7 +61,7 @@ const choose = async name => {
 };
 try {
   await page.goto(origin + "/mac-files-test");
-  await page.getByAltText("Claude Desktop 客机窗口").waitFor();
+  await page.getByRole("img", { name: "Claude Desktop 客机窗口" }).waitFor();
   await choose("paper.txt");
   await waitForCount("finish", 1);
   assert.deepEqual(operations.slice(0, 3).map(item => item.action), ["start", "upload", "finish"]);
@@ -90,7 +90,7 @@ try {
   failUpload = true;
   await choose("failed.txt");
   await waitForCount("cancel", 1);
-  await page.getByRole("alert").filter({ hasText: "测试附件传递中断" }).waitFor();
+  await page.getByRole("status").filter({ hasText: "测试附件传递中断" }).waitFor();
   await choose("retry.txt");
   await waitForCount("finish", 3);
   chooser = { id: "99999999-2222-4333-8444-111111111111", kind: "chooser", multiple: true, target: "desktop" };

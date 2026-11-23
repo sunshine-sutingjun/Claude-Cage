@@ -4,16 +4,17 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"github.com/sylvinus/agent-vm/internal/guestos"
 	"strings"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/guestos"
 )
 
 //go:embed macos_extension_probe.pl
 var macOSProbeFSKit string
 
 func (s *Server) checkMacOSSetupProjects(parent context.Context) error {
-	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	probe := "exec /usr/bin/perl -"
 	if s.macosGuest != nil && s.macosGuest.Backend == guestos.MacOSQEMU {
@@ -23,10 +24,11 @@ func (s *Server) checkMacOSSetupProjects(parent context.Context) error {
 	cmd.Stdin = strings.NewReader(macOSProbeFSKit)
 	err := cmd.Run()
 	s.mu.Lock()
+	s.macSetupProjectsAttempt = time.Now()
 	if err != nil {
 		s.macSetupProjectsChecked = time.Time{}
 	} else {
-		s.macSetupProjectsChecked = time.Now()
+		s.macSetupProjectsChecked = s.macSetupProjectsAttempt
 	}
 	s.mu.Unlock()
 	if err != nil {

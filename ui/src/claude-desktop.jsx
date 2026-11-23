@@ -33,7 +33,7 @@ export function useDesktopZoom(automatic = false) {
   return [zoom, setZoom];
 }
 
-export function DesktopToolbar({ desktop, platform, title = "Claude Desktop", zoom, setZoom, onConfirm, onStop, busy, refresh, sidebarCollapsed, onExpand, children, automatic = false }) {
+export function DesktopToolbar({ desktop, platform, title = "Claude Desktop", zoom, setZoom, onConfirm, onStop, busy, refresh, refreshLabel = "刷新 " + title + " 状态", sidebarCollapsed, onExpand, children, automatic = false }) {
   const [hidden, setHidden] = useState(() => {
     try { return localStorage.getItem("cage-desktop-toolbar-hidden") === "true"; }
     catch { return false; }
@@ -104,7 +104,8 @@ export function DesktopToolbar({ desktop, platform, title = "Claude Desktop", zo
         )}
         <button
           className="icon-button"
-          aria-label={"刷新 " + title + " 状态"}
+          aria-label={refreshLabel}
+          title={refreshLabel}
           disabled={busy}
           onClick={refresh}
         >

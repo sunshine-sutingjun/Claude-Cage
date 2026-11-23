@@ -223,7 +223,7 @@ func (s *Server) purgeSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.projectWorkspace(record.Workspace); err != nil {
+	if _, err := s.sessionWorkspace(record.Workspace); err != nil {
 		return err
 	}
 	if record.Purged {
@@ -257,7 +257,7 @@ func (s *Server) purgeSession(ctx context.Context, id string) error {
 	for _, execution := range executions {
 		input := map[string]any{
 			"cli_id": execution.CLIID, "config": execution.Config,
-			"account": execution.Account.GuestID, "workspace": guestPath(record.Workspace),
+			"account": execution.Account.GuestID, "workspace": s.cliWorkspace(record.Workspace),
 			"expect_history": execution.CLIID != record.CLIID || record.Resume,
 		}
 		if err := s.windowsConversationInput(record, input); err != nil {

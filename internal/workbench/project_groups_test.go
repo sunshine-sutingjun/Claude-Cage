@@ -87,6 +87,72 @@ func TestProjectGroupRejectsProtectedMemberBeforeOpeningAnyShare(t *testing.T) {
 	}
 }
 
+func TestProjectFolderModesPersistAndRevoke(t *testing.T) {
+	s, source, output := groupFixture(t)
+	s.preferences.ClaudeTerminalCommand = "claude --continue"
+	readOnly := &projectShare{probe: newProjectMountProbe()}
+	s.projectShares[source] = readOnly
+	saveGroupRequest(t, s, projectGroup{Name: "资料和成果", Folders: []string{source, output}, FolderModes: map[string]projectFolderMode{
+		source: projectFolderRead, output: projectFolderWrite,
+	}}, http.StatusOK)
+
+	restarted := testServer(t)
+	restarted.profile = s.profile
+	saved, err := restarted.readSharedProjects()
+	if err != nil || saved.folderMode(source) != projectFolderRead || saved.folderMode(output) != projectFolderWrite {
+		t.Fatalf("project modes after restart: %+v %v", saved, err)
+	}
+
+	draft := projectGroup{Workspace: source, Name: "只重命名", Folders: []string{source, output}}
+	saveGroupRequest(t, s, draft, http.StatusOK)
+	groups, err := s.projectGroups()
+	if err != nil || len(groups) != 1 || groups[0].FolderModes[source] != projectFolderRead {
+		t.Fatalf("legacy edit changed the previous mode: %+v %v", groups, err)
+	}
+
+	draft.FolderModes = map[string]projectFolderMode{source: projectFolderWrite, output: projectFolderWrite}
+	s.terminals.sessions = map[string]*terminalSession{"live": {id: "live", workspace: output}}
+	saveGroupRequest(t, s, draft, http.StatusConflict)
+	if s.projectShares[source] != readOnly {
+		t.Fatal("a rejected change revoked the original share")
+	}
+	s.terminals.sessions = nil
+	s.browserControl = browserClientForTest(t, s, browserTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"tabs":[]}`)), Header: http.Header{}}, nil
+	}))
+	detached := false
+	readOnly.detach = func() { detached = true }
+	saveGroupRequest(t, s, draft, http.StatusOK)
+	saved, err = restarted.readSharedProjects()
+	if err != nil || saved.folderMode(source) != projectFolderWrite || s.projectShares[source] != nil || !detached || s.projectShares[output] == nil {
+		t.Fatalf("changed authorization was not persisted and revoked: %+v, %v", saved, err)
+	}
+}
+
+func TestProjectFolderModesRejectOverlappingGrants(t *testing.T) {
+	s, parent, _ := groupFixture(t)
+	child := filepath.Join(parent, "nested")
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	saveGroupRequest(t, s, projectGroup{Name: "冲突", Folders: []string{parent, child}, FolderModes: map[string]projectFolderMode{
+		child: projectFolderRead,
+	}}, http.StatusBadRequest)
+	if paths, _ := s.projectPaths(); len(paths) != 0 {
+		t.Fatalf("failed project persisted a grant: %q", paths)
+	}
+	s.projectShares[parent] = &projectShare{probe: newProjectMountProbe()}
+	saveGroupRequest(t, s, projectGroup{Name: "只读父目录", Folders: []string{parent}, FolderModes: map[string]projectFolderMode{
+		parent: projectFolderRead,
+	}}, http.StatusOK)
+	saveGroupRequest(t, s, projectGroup{Name: "读写子目录", Folders: []string{child}}, http.StatusBadRequest)
+	data, _ := json.Marshal(map[string]any{"workspace": child, "add": true})
+	w := request(s, "POST", "/api/projects/open", s.origin, string(data), true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "共享权限冲突") || s.projectShares[child] != nil {
+		t.Fatalf("legacy project picker did not reject the conflicting grant: %d %q", w.Code, w.Body.String())
+	}
+}
+
 func TestProjectGroupUnbindChecksDefaultSessionAndPreservesHistory(t *testing.T) {
 	s, a, b := groupFixture(t)
 	s.preferences.ClaudeTerminalCommand = "claude --continue" // no shared-conversation discovery needed for this fixture

@@ -311,7 +311,7 @@ func (d *desktopLocal) localSession(life, bootstrap context.Context, c *controll
 	c.client.Jar.SetCookies(u, []*http.Cookie{{
 		Name:  cookieName + "_" + u.Port() + "-desktop",
 		Value: trustedViewProof(c.record.Token), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
-	}})
+	}, deviceCookie(cookieName+"_"+u.Port(), c.record.Token)})
 	return remotehost.LocalSession(life, c.origin, manifest, c.client.Jar)
 }
 

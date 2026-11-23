@@ -81,23 +81,39 @@ func (s *start) applyShares(writable bool) error {
 		return err
 	}
 	ms, files := s.shares(writable)
+	if err := s.stageFiles(files); err != nil {
+		return err
+	}
 	mt := vm.ReverseSSHFS
 	if err := b.Edit(s.ctx, s.name, vm.Settings{Mounts: &ms, MountType: &mt}); err != nil {
 		s.warnf("Error: could not set the shares of VM '%s':\n%v", s.name, err)
 		return errStop
 	}
-	cache := s.state.Marker(state.FileMountsOf, s.name)
-	if err := os.Remove(cache); err != nil && !os.IsNotExist(err) {
-		s.warnf("Error: could not remove %s:\n%v", cache, err)
+	if len(files) > 0 {
+		if err := s.state.Write(state.FileMountsOf+s.name, []byte(fileMountLines(files))); err != nil {
+			s.warnf("Error: could not record the single files of ~/.agent-vm/volumes for VM '%s':\n%v", s.name, err)
+			return errStop
+		}
+	} else if err := os.Remove(s.state.Marker(state.FileMountsOf, s.name)); err != nil && !os.IsNotExist(err) {
+		s.warnf("Error: could not clear the single-file mount record: %v", err)
 		return errStop
 	}
-	if len(files) > 0 {
-		var lines []string
-		for _, f := range files {
-			lines = append(lines, f.Line())
-		}
-		if err := s.state.Write(state.FileMountsOf+s.name, []byte(strings.Join(lines, "\n")+"\n")); err != nil {
-			s.warnf("Error: could not record the single files of ~/.agent-vm/volumes for VM '%s':\n%v", s.name, err)
+	return nil
+}
+
+func fileMountLines(files []mounts.FileMount) string {
+	var lines strings.Builder
+	for _, f := range files {
+		lines.WriteString(f.Line())
+		lines.WriteByte('\n')
+	}
+	return lines.String()
+}
+
+func (s *start) stageFiles(files []mounts.FileMount) error {
+	for _, f := range files {
+		if !mounts.Stage(f.Src, f.Staging, s.io.Stderr) {
+			s.warnf("Error: could not safely stage '%s' for VM '%s'.", f.Src, s.name)
 			return errStop
 		}
 	}
@@ -379,14 +395,9 @@ func (s *start) ensureRunningLocked() error {
 			return errStop
 		}
 	}
-	// A run interrupted while Lima made it leaves a folder without lima.yaml.
-	// Under the VM's lock: no other run is making it now.
-	if d := filepath.Join(LimaHome(s.state), s.name); isDirNoYAML(d) {
-		s.warnf("Detected partial VM state at %s (no lima.yaml): cleaning up.", d)
-		if err := os.RemoveAll(d); err != nil {
-			s.warnf("Error: could not remove %s:\n%v", d, err)
-			return errStop
-		}
+	if err := prepareInstanceDir(filepath.Join(LimaHome(s.state), s.name)); err != nil {
+		s.warnf("Error: %v", err)
+		return errStop
 	}
 	inst, err := s.get(s.name)
 	if err != nil {
@@ -525,7 +536,28 @@ func (s *start) ensureRunningLocked() error {
 		s.warnf("Error: could not query Lima: %v", err)
 		return errStop
 	}
-	want, _ := s.shares(wantWritable)
+	want, files := s.shares(wantWritable)
+	recorded, err := os.ReadFile(s.state.Marker(state.FileMountsOf, s.name))
+	if err != nil && !os.IsNotExist(err) {
+		s.warnf("Error: could not read the single-file mount record: %v", err)
+		return errStop
+	}
+	filesChanged := string(recorded) != fileMountLines(files)
+	if os.IsNotExist(err) && wasRunning && len(files) == 0 {
+		// Legacy or interrupted state may have lost its record while Lima
+		// still exposes a numbered staging directory.
+		stagingRoot := filepath.Join(string(s.state), "file-mounts", s.name)
+		for _, mount := range inst.Mounts {
+			if paths.Equal(paths.Host(filepath.Dir(mount.Location)), paths.Host(stagingRoot)) {
+				filesChanged = true
+				break
+			}
+		}
+	}
+	if filesChanged && wasRunning {
+		s.warnf("Single-file volumes changed. Stop VM '%s' before applying its new file mounts.", s.name)
+		return errStop
+	}
 	if cageWritableGit() && wasRunning && !s.opts.Scratch {
 		currentRoot := false
 		for _, mount := range inst.Mounts {
@@ -556,10 +588,10 @@ func (s *start) ensureRunningLocked() error {
 			return errStop
 		}
 	}
-	switch {
-	case gitStale && wasRunning && !s.protect:
+	if gitStale && wasRunning && !s.protect {
 		s.warnf("Note: VM '%s' keeps .git read-only until it stops.", s.name)
-	case !wasRunning && stale:
+	}
+	if !wasRunning && (stale || filesChanged) {
 		switch {
 		case gitStale && s.protect:
 			fmt.Fprintf(s.io.Stdout, "Making every .git read-only for VM '%s'...\n", s.name)
@@ -586,6 +618,10 @@ func (s *start) ensureRunningLocked() error {
 		if err := s.applyShares(wantWritable); err != nil {
 			return err
 		}
+	} else if !isNew {
+		if err := s.stageFiles(files); err != nil {
+			return err
+		}
 	}
 
 	if wasRunning {
@@ -593,7 +629,7 @@ func (s *start) ensureRunningLocked() error {
 	} else if err := s.boot(); err != nil {
 		return err
 	}
-	return s.afterBoot(isNew, wasRunning, wantWritable)
+	return s.afterBoot(wasRunning, wantWritable)
 }
 
 // baseMarkers are the base's markers as they were when it was cloned: nil
@@ -629,12 +665,40 @@ func (s *start) dropNew() {
 	}
 }
 
-func isDirNoYAML(d string) bool {
-	if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-		return false
+// Under the instance lock, an empty directory left by an interrupted create
+// can be reclaimed. A missing configuration alone says nothing about its disk.
+func prepareInstanceDir(dir string) error {
+	config := filepath.Join(dir, "lima.yaml")
+	info, err := os.Stat(config)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("expected a regular VM configuration at %s; check the configuration and retry", config)
+		}
+		f, err := os.Open(config)
+		if err != nil {
+			return fmt.Errorf("could not read the VM configuration; check storage access and retry: %w", err)
+		}
+		return f.Close()
 	}
-	_, err := os.Stat(filepath.Join(d, "lima.yaml"))
-	return err != nil
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("could not inspect the VM configuration; check storage access and retry: %w", err)
+	}
+	info, err = os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected a VM directory at %s; check the storage location and retry", dir)
+	}
+	// Remove only an empty directory. The OS also rejects the removal if a
+	// file appears after the configuration check.
+	if err := os.Remove(dir); err != nil {
+		return fmt.Errorf("VM files preserved at %s: lima.yaml is missing (%w). Check the storage location and restore this VM's configuration from backup. To start fresh, confirm the VM is stopped, move the whole directory outside the Lima home, then retry", dir, err)
+	}
+	return nil
 }
 
 // boot starts the stopped VM, its config checked first.
@@ -668,7 +732,7 @@ func (s *start) boot() error {
 // afterBoot brings the running VM's shares in line with the mode asked, by
 // a write probe on the project (which pushes the env too), then installs
 // the terminal's terminfo, runs the runtime scripts and binds single files.
-func (s *start) afterBoot(isNew, wasRunning, wantWritable bool) error {
+func (s *start) afterBoot(wasRunning, wantWritable bool) error {
 	o := s.opts
 	guest := paths.Guest(s.dir)
 	var guestEnv, guestRuntime, projectRuntime, payload string
@@ -787,7 +851,7 @@ func (s *start) afterBoot(isNew, wasRunning, wantWritable bool) error {
 		fmt.Fprintln(s.io.Stdout, "Running project runtime setup...")
 		s.runHostScript(projectRuntime)
 	}
-	s.bindFiles(isNew)
+	s.bindFiles()
 	if path := os.Getenv(cage.ConfigEnv); path != "" {
 		cfg, err := cage.Load(path)
 		if err != nil {
@@ -862,30 +926,11 @@ func (s *start) terminfo() {
 }
 
 // bindFiles binds the single files of ~/.agent-vm/volumes in place in the
-// VM, an existing VM's staged copy refreshed first, so an edit saved by
-// rename on the host shows. A bind does not survive a restart, and is
-// skipped when there.
-func (s *start) bindFiles(isNew bool) {
-	b, err := os.ReadFile(s.state.Marker(state.FileMountsOf, s.name))
-	if err != nil {
-		return
-	}
+// VM. Use the current, checked plan that was staged before boot or reuse.
+func (s *start) bindFiles() {
 	var entries []string
-	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
-		f := strings.SplitN(line, "|", 4)
-		if len(f) != 4 || f[1] == "" {
-			continue
-		}
-		switch {
-		case isNew:
-		case !exists(f[0]):
-			s.warnf("Warning: Mount source '%s' no longer exists; VM will see the last-staged copy.", f[0])
-		case !mounts.Stage(f[0], f[1], s.io.Stderr):
-			s.warnf("Warning: Failed to refresh staged '%s'; VM may see stale content.", f[0])
-		}
-		if f[2] != "" && f[3] != "" {
-			entries = append(entries, f[2]+"|"+f[3])
-		}
+	for _, f := range s.builtFiles {
+		entries = append(entries, f.BindSrc+"|"+f.BindDst)
 	}
 	if len(entries) == 0 {
 		return

@@ -28,6 +28,8 @@ test('select only exact platform artifacts and explicit unsigned consent', () =>
   assert.throws(() => parseArgs(['--version', '../../bad']), { code: 'invalid_input' });
   const wrong = release('linux-amd64'); wrong.assets[0].browser_download_url = 'https://example.org/package';
   assert.throws(() => selectAsset(wrong, { platform: 'linux-amd64' }), { code: 'invalid_release' });
+  const oversized = release('linux-amd64'); oversized.assets[0].size = 2 * 1024 ** 3 + 1;
+  assert.throws(() => selectAsset(oversized, { platform: 'linux-amd64' }), { code: 'invalid_release' });
 });
 
 test('checksum manifest must identify exactly one package', () => {
@@ -39,9 +41,12 @@ test('checksum manifest must identify exactly one package', () => {
 test('plan pins metadata and sums to one release; downloads are verified and exclusive', async t => {
   const options = parseArgs(['plan', '--platform', 'linux-amd64', '--version', tag]);
   const metadata = release(options.platform);
+  const manifest = `\uFEFF${hash}  ${metadata.assets[0].name}\r\n`;
+  metadata.assets[0].digest = `sha256:${hash}`;
+  metadata.assets[1].digest = 'sha256:' + createHash('sha256').update(manifest).digest('hex');
   const fetchFixture = async url => {
     if (String(url).startsWith('https://api.github.com/')) return new Response(JSON.stringify(metadata));
-    if (String(url).endsWith('SHA256SUMS')) return new Response(`${hash}  ${metadata.assets[0].name}\n`);
+    if (String(url).endsWith('SHA256SUMS')) return new Response(manifest);
     return new Response(data);
   };
   const plan = await makePlan(options, fetchFixture);
@@ -57,9 +62,26 @@ test('plan pins metadata and sums to one release; downloads are verified and exc
   assert.equal(await readFile(result.path, 'utf8'), 'existing user file');
   await assert.rejects(downloadPlan({ ...plan, asset: 'bad.deb', sha256: '0'.repeat(64) }, directory, fetchFixture), { code: 'checksum_mismatch' });
   assert.deepEqual(await readdir(directory), [plan.asset]);
+  for (const item of metadata.assets) {
+    const original = item.digest;
+    item.digest = 'sha256:' + '0'.repeat(64);
+    await assert.rejects(makePlan(options, fetchFixture), { code: 'checksum_mismatch' });
+    item.digest = original;
+  }
 });
 
-test('refuse HTTP redirects and redact transport failures at the CLI boundary', async () => {
-  await assert.rejects(httpsResponse('https://example.org/', async () => new Response(null, { status: 302, headers: { location: 'http://example.org/' } })), { code: 'unsafe_download' });
-  await assert.rejects(httpsResponse('https://example.org/', async () => { throw new Error('https://secret.example/private?token=do-not-echo'); }), error => error.code === 'download_connection_failed' && !error.message.includes('do-not-echo'));
+test('only release asset requests follow GitHub CDN redirects', async () => {
+  const asset = prefix + 'SHA256SUMS';
+  const cdn = 'https://release-assets.githubusercontent.com/fixture?signature=test';
+  for (const [source, location] of [[asset, 'http://release-assets.githubusercontent.com/'], [asset, 'https://example.org/'], [asset, cdn.replace('.com/', '.com:444/')], ['https://api.github.com/repos/Lee-xeo/Claude-Cage/releases/latest', cdn]]) {
+    const calls = [];
+    await assert.rejects(httpsResponse(source, async url => {
+      calls.push(url.href);
+      return new Response(null, { status: 302, headers: { location } });
+    }), { code: 'unsafe_download' });
+    assert.deepEqual(calls, [source]);
+  }
+  const response = await httpsResponse(asset, async url => url.href === cdn ? new Response('ok') : new Response(null, { status: 302, headers: { location: cdn } }));
+  assert.equal(await response.text(), 'ok');
+  await assert.rejects(httpsResponse(asset, async () => { throw new Error('https://secret.example/private?token=do-not-echo'); }), error => error.code === 'download_connection_failed' && !error.message.includes('do-not-echo'));
 });

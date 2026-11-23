@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/guestprofile"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"golang.org/x/crypto/ssh"
 )
@@ -90,12 +91,18 @@ func TestMacOSStartAndControllerReconnectRequireFreshNetworkCheck(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newMacWorkspaceGuest(t, func(_ ssh.Channel, command string) (uint32, bool) {
+				if strings.Contains(command, "macos-native-browser.mjs") {
+					return 1, true
+				}
 				return 0, strings.Contains(command, "uname -s")
 			})
 			s := g.s
 			s.ready = false
 			if tc.setup {
 				s.macosGuest.SetupID = "awaiting-first-setup"
+				if _, err := guestprofile.Create(s.profile, guestprofile.Options{}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := writePrivate(filepath.Join(s.profile, "network-intent.json"), networkIntent{Version: 1, Paused: tc.paused, PauseVersion: 7}); err != nil {
 				t.Fatal(err)
@@ -170,6 +177,13 @@ func TestMacOSStartAndControllerReconnectRequireFreshNetworkCheck(t *testing.T) 
 			}
 			if state := gate.Status(); !s.ready || state.Mode != cage.GateClosed || !time.Now().After(state.Until) || s.networkPaused != tc.paused || s.safety.pauseVersion != 7 {
 				t.Fatalf("ready=%t mode=%s paused=%t generation=%d", s.ready, state.Mode, s.networkPaused, s.safety.pauseVersion)
+			}
+			if tc.setup {
+				// The same guest has working SSH but no GUI browser relay.
+				s.macosGuest.SetupID = ""
+				if err := s.attachMacOSGuest(); err == nil || s.ready || gate.Status().Mode != cage.GateClosed {
+					t.Fatalf("attach after setup without a browser: err=%v ready=%t gate=%s", err, s.ready, gate.Status().Mode)
+				}
 			}
 		})
 	}

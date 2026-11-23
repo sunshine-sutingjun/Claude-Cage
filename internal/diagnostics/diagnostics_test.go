@@ -184,16 +184,20 @@ func TestGuestRunnerSharesRedactionAndExitStatus(t *testing.T) {
 	t.Setenv("UV_CACHE_DIR", t.TempDir())
 	script := filepath.Join(t.TempDir(), "runner.py")
 	_ = os.WriteFile(script, []byte(GuestRunner()), 0600)
-	cmd := exec.Command("uv", "run", "--no-project", "python", script, "/bin/sh", "-c", `printf 'Cookie: one=first-secret; two=second-secret\nhttps://user:pass@example.com/secret\nsafe-line\n'; exit 7`)
-	out, err := cmd.CombinedOutput()
+	input := "WARN Cookie: one=first-secret; two=second-secret\n" +
+		`{"password":"quoted\"suffix-secret","token":"https://example.com/escaped\"url-secret"}` + "\n" +
+		`token=Bearer bearer-secret` + "\n" +
+		`password='truncated\'value more-secret` + "\nsafe-line\n"
+	cmd := exec.Command("uv", "run", "--no-project", "python", script, "/bin/sh", "-c", `printf '%s' "$1"; exit 7`, "sh", input)
+	out, err := cmd.Output()
 	var exit *exec.ExitError
 	if err == nil {
 		t.Fatal("exit status lost")
 	} else if !strings.Contains(err.Error(), "exit status 7") {
 		t.Fatalf("runner failed: %s %v %v", out, err, exit)
 	}
-	if strings.Contains(string(out), "first-secret") || strings.Contains(string(out), "second-secret") || strings.Contains(string(out), "example.com") {
-		t.Fatalf("guest leaked: %s", out)
+	if string(out) != Redact(input) || strings.Contains(string(out), "-secret") || strings.Contains(string(out), "example.com") {
+		t.Fatalf("guest and host must both remove complete credentials: %q", out)
 	}
 	if !strings.Contains(string(out), "safe-line") {
 		t.Fatalf("guest output missing: %s", out)

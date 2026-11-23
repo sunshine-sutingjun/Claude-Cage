@@ -341,7 +341,7 @@ func isolatedLocationProxy(t *testing.T, configPath, core string, cfg cage.Confi
 	if err != nil {
 		t.Fatal("cannot generate isolated core config", err)
 	}
-	name, err := managedproxy.PhysicalInterface(context.Background())
+	name, err := store.TransportInterface(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

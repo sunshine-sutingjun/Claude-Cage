@@ -6,10 +6,11 @@ import "../src/style.css";
 
 function Fixture() {
   const [notice, setNotice] = useState("");
+  const [windowStatus, setWindowStatus] = useState("");
   const files = useDesktopFiles(true, setNotice, true);
   return <div className="app">
-    <output>{notice}</output>
-    <MacOSAppWindow visible uploads={files.uploads} onStatus={setNotice} onConfirm={async () => true} />
+    <MacOSAppWindow visible uploads={files.uploads} onStatus={setNotice} onWindowStatus={setWindowStatus} onConfirm={async () => true} />
+    <footer className="status-bar"><output>{windowStatus || notice}</output></footer>
   </div>;
 }
 createRoot(document.getElementById("root")).render(<Fixture />);

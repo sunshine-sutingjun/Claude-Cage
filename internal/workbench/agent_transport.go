@@ -81,7 +81,7 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 	// These endpoints are internal transports, not user actions. Device
 	// enrollment/unlock must run inside the same native credential store and
 	// biometric policy as the desktop; never return its wrapping secret.
-	if u.Path == "/api/agent/native/window" || u.Path == "/api/account/device-enroll" || u.Path == "/api/account/device-unlock" || u.Path == "/api/account/device-revoke" || u.Path == "/api/session" || u.Path == "/api/launch" || u.Path == "/api/handoff" || u.Path == "/api/desktop-owner" || strings.HasPrefix(u.Path, "/api/desktop-local/") {
+	if u.Path == "/api/agent/native/window" || nativeDeviceRoute(u.Path) || u.Path == "/api/session" || u.Path == "/api/launch" || u.Path == "/api/handoff" || u.Path == "/api/desktop-owner" || strings.HasPrefix(u.Path, "/api/desktop-local/") {
 		return result, &AgentError{Code: "native_transport_required", Message: "Use native.submit with the same accountDevice or desktop action. Transport credentials are not exported.", NextAction: "native.submit"}
 	}
 	// Client-only operations must address the desktop explicitly. Ordinary

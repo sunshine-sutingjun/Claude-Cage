@@ -14,6 +14,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/managedproxy"
 )
 
 func monitorTimingRecords(t *testing.T, s *Server, kind string) []map[string]string {
@@ -191,12 +192,12 @@ func TestMonitorTimingRecordsRenewalAndSkips(t *testing.T) {
 
 func TestNetworkMonitorRecordsAllOuterStages(t *testing.T) {
 	s := testServer(t)
-	previous := physicalProxyInterface
-	physicalProxyInterface = func(context.Context) (string, error) {
+	previous := proxyTransportInterface
+	proxyTransportInterface = func(managedproxy.Store, context.Context) (string, error) {
 		time.Sleep(30 * time.Millisecond)
 		return "en0", nil
 	}
-	defer func() { physicalProxyInterface = previous }()
+	defer func() { proxyTransportInterface = previous }()
 	s.monitorNetworkTick()
 	records := monitorTimingRecords(t, s, "network")
 	if len(records) != 1 {

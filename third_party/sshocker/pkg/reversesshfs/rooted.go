@@ -33,6 +33,7 @@ type rootedHandlers struct {
 	readonlyNames []string
 	foldedNames   []string // readonlyNames as FoldName gives them
 	guardRoot     string   // the served directory as Guard is told
+	mountProbe    *projectProbeFile
 	rootedSys
 
 	mu    sync.Mutex // protects relay
@@ -83,6 +84,22 @@ func newRootedServerAt(rwc io.ReadWriteCloser, localPath, exportedPath string, r
 
 func (h *rootedHandlers) Close() error {
 	return errors.Join(h.root.Close(), h.rootedSys.close())
+}
+
+// ServeReadOnlyProject serves localPath with an in-memory mount probe.
+func ServeReadOnlyProject(transport io.ReadWriteCloser, localPath string, virtualRoot bool, probe ProjectMountProbe) error {
+	export := slashPath(localPath)
+	if virtualRoot {
+		export = "/"
+	}
+	server, root, err := newRootedServerAt(transport, localPath, export, true, nil)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	defer server.Close()
+	root.mountProbe = &projectProbeFile{ProjectMountProbe: probe, created: time.Now()}
+	return server.Serve()
 }
 
 // rel maps a request path to a path relative to the root.
@@ -167,6 +184,9 @@ func (h *rootedHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	rel, err := h.rel(r.Filepath)
 	if err != nil {
 		return nil, err
+	}
+	if h.mountProbe != nil && rel == h.mountProbe.Name() {
+		return strings.NewReader(h.mountProbe.Challenge), nil
 	}
 	f, err := h.openRead(rel)
 	if err != nil {
@@ -357,6 +377,9 @@ func (h *rootedHandlers) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		}
 		return &dirLister{f: f}, nil
 	case "Stat":
+		if h.mountProbe != nil && rel == h.mountProbe.Name() {
+			return listerAt{h.mountProbe}, nil
+		}
 		// FSTAT: r.Filepath is where the file was opened, which may now be another file.
 		var f *os.File
 		switch hf := r.HandleFile().(type) {
@@ -386,6 +409,9 @@ func (h *rootedHandlers) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
 	rel, err := h.rel(r.Filepath)
 	if err != nil {
 		return nil, err
+	}
+	if h.mountProbe != nil && rel == h.mountProbe.Name() {
+		return listerAt{h.mountProbe}, nil
 	}
 	fi, err := h.root.Lstat(rel)
 	if err != nil {

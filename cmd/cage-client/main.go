@@ -78,11 +78,16 @@ func run(args []string) error {
 			case "--json":
 			case "--existing":
 				options.UseExisting = true
+			case "--native-device":
+				options.NativeDevice = true
 			case "--complete-update":
 				options.CompleteUpdate = true
 			default:
 				return errors.New("unsupported desktop option")
 			}
+		}
+		if options.NativeDevice && (options.UseExisting || options.CompleteUpdate) {
+			return errors.New("native device login requires the current controller")
 		}
 		return printJSON(workbench.Desktop(config, options))
 	case "prepare-update":

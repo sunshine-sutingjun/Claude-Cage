@@ -26,6 +26,7 @@ export function ProjectDialog({
   const [editing, setEditing] = useState("");
   const [name, setName] = useState("");
   const [folders, setFolders] = useState([]);
+  const [folderModes, setFolderModes] = useState({});
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState("");
   const [pending, setPending] = useState(null);
@@ -77,6 +78,13 @@ export function ProjectDialog({
   const displayName = value => projectName(value, groups);
   const selectedGroup = groups.find(group => group.workspace === path);
   const draftFolders = [...new Set([...folders, ...(path.trim() ? [path.trim()] : [])])];
+  const folderModePicker = folder => (
+    <select aria-label={`${projectName(folder)} 的共享权限`} value={folderModes[folder] ?? "write"}
+      disabled={busy} onChange={event => setFolderModes({ ...folderModes, [folder]: event.target.value })}>
+      <option value="write">读写</option>
+      <option value="read">只读</option>
+    </select>
+  );
   const appendFolder = value => {
     const folder = value.trim();
     if (!folder) return;
@@ -87,6 +95,7 @@ export function ProjectDialog({
   const edit = () => {
     if (!selectedGroup) return;
     setEditing(selectedGroup.workspace); setName(selectedGroup.name);
+    setFolderModes(selectedGroup.folder_modes || {});
     setFolders(selectedGroup.folders); setPath(""); setAdding(true); setError("");
   };
   const selectedShare = shares.find((item) => item.guest_path === path);
@@ -127,6 +136,7 @@ export function ProjectDialog({
   const add = () => {
     setAdding(true);
     setEditing(""); setName(""); setFolders([]);
+    setFolderModes({});
     setPath("");
     setError("");
     if (remote) void browse("");
@@ -137,6 +147,8 @@ export function ProjectDialog({
     if (adding) {
       const saved = await api("/projects/save", {
         workspace: editing, name: name.trim() || projectName(draftFolders[0]), folders: draftFolders,
+        ...(!remote && { folder_modes: Object.fromEntries(draftFolders
+          .filter(folder => folderModes[folder] !== undefined).map(folder => [folder, folderModes[folder]])) }),
       });
       if (saved.approval) {
         setPending({ workspace: saved.workspace, grant: saved.approval });
@@ -217,21 +229,23 @@ export function ProjectDialog({
         {!sharing && !adding && <>
           <fieldset className="project-picker-list" disabled={busy || Boolean(removeTarget)}>
             <legend>项目</legend>
-            {projectList.map((project) => <div className={`project-picker-row ${path === project ? "selected" : ""}`} key={project}>
+            {projectList.map((project) => {
+              const group = groups.find(item => item.workspace === project);
+              return <div className={`project-picker-row ${path === project ? "selected" : ""}`} key={project}>
               <label className="project-picker-item">
                 <input type="radio" name="project" value={project} checked={path === project} onChange={() => { setPath(project); setError(""); }} />
                 <FolderOpen size={18} aria-hidden="true" />
                 <span>
                   <strong>{displayName(project)}</strong>
-                  <small>{shares.find((s) => s.guest_path === project)?.path || groups.find(g => g.workspace === project)?.folders.join(" · ") || project}</small>
-                  {status.project_errors?.some((item) => (groups.find(group => group.workspace === project)?.folders || [project]).includes(item.path)) && <small>需要重新连接，选择后重试</small>}
+                  <small>{shares.find((s) => s.guest_path === project)?.path || group?.folders.map(folder => group.folder_modes?.[folder] === "read" ? `${folder}（只读）` : folder).join(" · ") || project}</small>
+                  {status.project_errors?.some((item) => (group?.folders || [project]).includes(item.path)) && <small>需要重新连接，选择后重试</small>}
                 </span>
               </label>
               {path === project && !selectedShare && !removeTarget && <div className="project-picker-actions">
                 {selectedGroup && <button type="button" className="icon-button" aria-label="编辑名称与文件夹…" disabled={busy || !status.ready} onClick={edit}><PencilLine size={16} aria-hidden="true" /></button>}
                 {activate && <button type="button" className="icon-button project-picker-remove" aria-label="从 Cage 移除此项目" disabled={busy} onClick={() => { setRemoveTarget(path); setError(""); setRecovery(""); }}><FolderMinus size={16} aria-hidden="true" /></button>}
               </div>}
-            </div>)}
+            </div>})}
           </fieldset>
           {selectedShare && <button type="button" disabled={submitting} onClick={() => revoke(selectedShare)}>停止共享本机项目（{selectedShare.readonly ? "只读" : "读写"}）</button>}
           {removeTarget && <section className="project-picker-list" aria-label="确认移除项目">
@@ -251,6 +265,7 @@ export function ProjectDialog({
             {folders.map((folder, index) => <li key={folder}>
               <FolderOpen size={16} aria-hidden="true" /><span><strong>{projectName(folder)}</strong><small>{folder}</small></span>
               {index === 0 && <small className="project-folder-default">默认</small>}
+              {!remote && folderModePicker(folder)}
               <button type="button" disabled={busy || folder === editing} aria-label={`移除文件夹 ${projectName(folder)}`} title={folder === editing ? "默认文件夹用于关联会话历史，需保留" : "解除文件夹绑定"} onClick={() => setFolders(previous => previous.filter(value => value !== folder))}>移除</button>
             </li>)}
           </ul>}
@@ -268,6 +283,7 @@ export function ProjectDialog({
             spellCheck="false"
             autoComplete="off"
           />
+          {!remote && path.trim() && !folders.includes(path.trim()) && folderModePicker(path.trim())}
           {path.trim() && <button type="button" disabled={busy} onClick={() => appendFolder(path)}>添加</button>}
           {(remote || nativeAvailable()) && (
             <button type="button" onClick={choose} disabled={busy || browsing}>
@@ -285,9 +301,9 @@ export function ProjectDialog({
             <button type="button" disabled={browsing || !directories.selectable} onClick={() => { appendFolder(directories.path); setDirectories(null); }}>选择此云端文件夹</button>
           </section>}
         </>}
-        {adding && <p className="field-help">Claude 从默认文件夹启动，并可读写其余绑定文件夹。修改绑定后，新建或重新打开会话生效。{editing && "默认文件夹用于关联会话历史，需保留。解绑前请关闭项目的终端、运行中会话和编辑器。"}</p>}
+        {adding && <p className="field-help">Claude 从默认文件夹启动。{!remote && "选只读可查看文件和 Git 历史。"}修改绑定后，新建或重新打开会话生效。{editing && "默认文件夹用于关联会话历史，需保留。解绑或修改权限前，请关闭项目的终端、运行中会话和编辑器。"}</p>}
         <p className="field-help project-picker-note">
-          <span>{remote ? "云端项目保存在服务器上。" : "绑定文件夹中的改动会直接写入本机。"}</span>
+          <span>{remote ? "云端项目保存在服务器上。" : "读写文件夹中的改动会直接写入本机。"}</span>
           <span>所有项目共用 Cage 环境，已有终端和网页会保持运行。</span>
         </p>
         {!status.ready && <p className="field-help">环境就绪后可添加或打开项目。已有项目仍可从列表移除。</p>}

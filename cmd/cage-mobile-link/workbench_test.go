@@ -36,10 +36,48 @@ func TestIsolatedWorkbench(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"} {
+		t.Setenv(key, home)
+	}
 	profile := filepath.Join(dir, "profile")
 	if err := os.Mkdir(profile, 0700); err != nil {
 		t.Fatal(err)
 	}
+	project := filepath.Join(dir, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	project, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixture := func(path string, value any) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeNewPrivate(path, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFixture(filepath.Join(profile, "projects.json"), map[string]any{"paths": []string{project}})
+	// A stopped guest can serve persisted history and accept idempotent retries.
+	// Starting the PTY for a brand-new conversation requires a running guest.
+	const id = "b4fc408f-a017-4b2e-b95c-744e01af058e"
+	history := filepath.Join(profile, "mobile-cli-sessions")
+	if err := os.Mkdir(history, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(filepath.Join(history, id+".json"), map[string]any{
+		"id": id, "cli_id": "fdc145bd-d525-488f-be3d-1abeb79b728c", "workspace": project,
+		"title": "Offline history", "revision": 1,
+		"turns": []map[string]string{{"id": "54393beb-ac4b-4b44-9105-7da1d4d07eec", "status": "completed", "text": "Fixture reply"}},
+	})
 	config := filepath.Join(profile, "config.json")
 	service := exec.CommandContext(ctx, cage, "serve")
 	service.Env = append(os.Environ(), "CLAUDE_CAGE_CONFIG="+config)
@@ -70,6 +108,7 @@ func TestIsolatedWorkbench(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	browser := &http.Client{Jar: jar, Transport: &http.Transport{Proxy: nil}, Timeout: 8 * time.Second}
 	defer browser.CloseIdleConnections()
+	var mobileOrigin, mobileToken string
 	call := func(origin, method, route string, body any, want int) []byte {
 		t.Helper()
 		var data []byte
@@ -86,11 +125,17 @@ func TestIsolatedWorkbench(t *testing.T) {
 		}
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Content-Type", "application/json")
+		if origin == mobileOrigin && mobileToken != "" {
+			req.Header.Set("X-Cage-Mobile-Session", mobileToken)
+		}
 		res, err := browser.Do(req)
 		if err != nil {
 			t.Fatalf("request to %s failed", route)
 		}
 		defer res.Body.Close()
+		if origin == mobileOrigin && route == "/link-session" {
+			mobileToken = res.Header.Get("X-Cage-Mobile-Session")
+		}
 		if res.StatusCode != want {
 			t.Fatalf("%s %s: status %d, want %d", method, route, res.StatusCode, want)
 		}
@@ -184,27 +229,33 @@ func TestIsolatedWorkbench(t *testing.T) {
 	if err != nil {
 		t.Fatal("invalid local mobile origin")
 	}
-	mobileOrigin := mobileEntry.Scheme + "://" + mobileEntry.Host
+	mobileOrigin = mobileEntry.Scheme + "://" + mobileEntry.Host
 	call(mobileOrigin, "POST", "/link-session", map[string]string{"token": mobileEntry.Fragment}, 204)
 	call(mobileOrigin, "GET", "/api/mobile/cli/projects", nil, 423)
 	pass := hex.EncodeToString(adminBytes[:16])
-	call(desktopOrigin, "POST", "/api/account/create", map[string]string{"username": "isolated-mobile", "password": pass, "confirm_password": pass}, 200)
+	call(desktopOrigin, "POST", "/api/account/create", map[string]string{"username": "isolated_mobile", "password": pass, "confirm_password": pass}, 200)
 	var projects struct{ Projects []struct{ Path string } }
-	if json.Unmarshal(call(mobileOrigin, "GET", "/api/mobile/cli/projects", nil, 200), &projects) != nil || len(projects.Projects) == 0 {
-		t.Fatal("no projects from isolated workbench")
+	if json.Unmarshal(call(mobileOrigin, "GET", "/api/mobile/cli/projects", nil, 200), &projects) != nil || len(projects.Projects) != 1 || projects.Projects[0].Path != project {
+		t.Fatal("isolated workbench did not return its saved project")
 	}
 	before := awaitFile(filepath.Join(profile, "workbench.json"))
-	const id = "b4fc408f-a017-4b2e-b95c-744e01af058e"
+	call(mobileOrigin, "POST", "/api/mobile/cli/sessions", map[string]string{"id": "1d43e6d6-645e-467f-b27d-23a21a077eb5", "workspace": project}, 409)
 	input := map[string]string{"id": id, "workspace": projects.Projects[0].Path}
-	call(mobileOrigin, "POST", "/api/mobile/cli/sessions", input, 200)
+	if view := call(mobileOrigin, "POST", "/api/mobile/cli/sessions", input, 200); !bytes.Contains(view, []byte("Fixture reply")) {
+		t.Fatal("retried creation did not preserve the original conversation")
+	}
 	if !strings.Contains(string(call(mobileOrigin, "GET", "/api/mobile/cli/sessions", nil, 200)), id) {
-		t.Fatal("created session missing")
+		t.Fatal("saved session missing")
 	}
 	var snapshot struct{ Revision json.Number }
 	if json.Unmarshal(call(mobileOrigin, "GET", "/api/mobile/cli/sessions/"+id, nil, 200), &snapshot) != nil || snapshot.Revision == "" {
 		t.Fatal("invalid real session revision")
 	}
 	call(mobileOrigin, "GET", "/api/mobile/cli/sessions/"+id+"?after="+snapshot.Revision.String(), nil, 204)
+	call(mobileOrigin, "POST", "/api/mobile/cli/sessions/"+id+"/metadata", map[string]string{"title": "Renamed offline"}, 200)
+	if update := call(mobileOrigin, "GET", "/api/mobile/cli/sessions/"+id+"?after="+snapshot.Revision.String(), nil, 200); !bytes.Contains(update, []byte("Renamed offline")) {
+		t.Fatal("changed history was missing from the revision update")
+	}
 	if after := awaitFile(filepath.Join(profile, "workbench.json")); !bytes.Equal(before, after) {
 		t.Fatal("mobile session changed desktop preferences")
 	}

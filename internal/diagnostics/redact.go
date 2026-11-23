@@ -13,16 +13,23 @@ const ipv4Address = `(?:[0-9]{1,3}\.){3}[0-9]{1,3}`
 // colon-separated hex would also erase timestamps and their diagnostic value.
 const ipv6Address = `(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){6}` + ipv4Address + `|(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{0,4}::[0-9a-f:.]*)`
 
+const sensitiveField = `(["']?(?:password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|secret|client[_-]?secret|authorization|proxy-authorization|cookie|set-cookie|auth|credential|subscription[_-]?url)["']?\s*[:=]\s*)`
+
+// A quoted credential may contain escaped delimiters or end mid-line in a
+// truncated message. Consume it before URL and token masking changes its text.
+const credentialValue = `(?:"(?:\\[^\r\n]|[^"\\\r\n])*"?|'(?:\\[^\r\n]|[^'\\\r\n])*'?|(?:Bearer|Basic)[ \t]+[a-z0-9._~+/=-]+|[^\s,;}]+)`
+
 var patterns = []struct {
 	re          *regexp.Regexp
 	replacement string
 }{
 	{regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`), ""},
-	{regexp.MustCompile(`(?im)^(\s*(?:cookie|set-cookie|authorization|proxy-authorization)\s*[:=]).*$`), "${1} [redacted]"},
 	{regexp.MustCompile(`(?is)-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?(?:-----END [^-]+-----|$)`), "[redacted key]"},
+	// Service logs often prefix HTTP headers with a timestamp or severity.
+	{regexp.MustCompile(`(?im)(\b(?:cookie|set-cookie|authorization|proxy-authorization)[ \t]*[:=]).*$`), "${1} [redacted]"},
+	{regexp.MustCompile(`(?i)` + sensitiveField + credentialValue), "${1}[redacted]"},
 	{regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"'` + "`" + `]+`), "[url]"},
 	{regexp.MustCompile(`(?i)\b(?:Bearer|Basic)\s+[a-z0-9._~+/=-]+`), "[redacted authorization]"},
-	{regexp.MustCompile(`(?i)(["']?(?:password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|secret|client[_-]?secret|authorization|proxy-authorization|cookie|set-cookie|auth|credential|subscription[_-]?url)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)`), "${1}[redacted]"},
 	{regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b`), "[redacted token]"},
 	// Imported proxy names are replaced with 24-character node IDs at runtime.
 	{regexp.MustCompile(`\b(?:[a-fA-F0-9]{24,}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})\b`), "[redacted id]"},

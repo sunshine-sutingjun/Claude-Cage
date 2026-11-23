@@ -20,10 +20,17 @@ import (
 
 // BootstrapClient serves only explicitly host-routed subscription requests.
 func BootstrapClient() *http.Client {
-	return &http.Client{Transport: subscriptionHostTransport{hostproxy.NewTransport(), BootstrapDNSURLs()}, Timeout: 30 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+	return NewSubscriptionClient(subscriptionHostTransport{hostproxy.NewTransport(), BootstrapDNSURLs()})
+}
+
+// NewSubscriptionClient follows HTTPS redirects without sending a subscription
+// URL (which may contain credentials in its path or query) as the Referer.
+func NewSubscriptionClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 3 || r.URL.Scheme != "https" || r.URL.User != nil {
 			return errors.New("订阅重定向被拒绝")
 		}
+		r.Header.Del("Referer")
 		return nil
 	}}
 }

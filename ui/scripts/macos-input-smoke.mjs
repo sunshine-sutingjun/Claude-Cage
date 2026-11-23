@@ -51,7 +51,7 @@ async function until(predicate) {
 }
 try {
   await page.getByRole("button", { name: chrome ? "打开浏览器" : app, exact: true }).click();
-  const surface = page.getByAltText(app + " 客机窗口");
+  const surface = page.getByRole("img", { name: app + " 客机窗口" });
   await surface.waitFor();
   await page.getByLabel("向 " + app + " 输入").waitFor({ state: "attached" });
   const bounds = await surface.boundingBox();

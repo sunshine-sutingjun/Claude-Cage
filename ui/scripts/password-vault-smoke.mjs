@@ -10,6 +10,7 @@ const { browser, page, state, errors } = await createWorkbench({ nativeRequest: 
   return null;
 } });
 let entries = [], blocked = [], candidate = null, filled = null, sequence = 0;
+let beforeReveal;
 await page.route("**/api/vault**", async route => {
   const req = route.request(), input = req.method() === "POST" ? req.postDataJSON() : {};
   if (!state.account.unlocked) return route.fulfill({ status: 423, body: "Cage 已锁定" });
@@ -39,7 +40,8 @@ await page.route("**/api/vault**", async route => {
     else entries.push({ ...entry, id: `saved-${++sequence}` });
   }
   if (input.action === "reveal") {
-    if (input.account_password !== state.accountPassword) return route.fulfill({ status: 400, body: "密码不正确" });
+    if (input.account_password !== state.accountPassword) return route.fulfill({ status: 400, contentType: "text/plain; charset=utf-8", body: "密码不正确" });
+    if (beforeReveal) await beforeReveal();
     return route.fulfill({ json: { password: entries.find(e => e.id === input.id).password } });
   }
   if (input.action === "delete") entries = entries.filter(e => e.id !== input.id);
@@ -67,6 +69,13 @@ try {
   await page.getByRole("button", { name: "验证并查看" }).click();
   await page.getByRole("alert").filter({ hasText: "密码不正确" }).waitFor();
   assert.equal(await page.getByLabel("已保存的网站密码").count(), 0);
+  beforeReveal = () => page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.getByLabel("Cage 账户密码", { exact: true }).fill(state.accountPassword);
+  await page.getByRole("button", { name: "验证并查看" }).click();
+  await page.waitForFunction(() => document.querySelector(".vault-editor input[type=password]")?.value === "" &&
+    !document.querySelector(".vault-editor button[type=submit]")?.disabled);
+  assert.equal(await page.getByLabel("已保存的网站密码").count(), 0);
+  beforeReveal = undefined;
   await page.getByLabel("Cage 账户密码", { exact: true }).fill(state.accountPassword);
   await page.getByRole("button", { name: "验证并查看" }).click();
   await page.getByLabel("已保存的网站密码").waitFor();
@@ -97,21 +106,22 @@ try {
   await page.getByRole("button", { name: "浏览器菜单", exact: true }).click();
   await page.getByRole("menuitem", { name: /密码 · 1 个账号/ }).waitFor();
   const trigger = page.getByRole("menuitem", { name: /密码 · 1 个账号/ });
-  const before = await page.locator(".browser-chrome").boundingBox();
+  const vaultMenu = page.locator(".vault-browser");
+  const before = await vaultMenu.boundingBox();
   await trigger.press("Enter");
   const picker = page.getByRole("region", { name: "当前网站的密码" });
   await picker.waitFor();
-  const after = await page.locator(".browser-chrome").boundingBox();
+  const after = await vaultMenu.boundingBox();
   assert.ok(after.height > before.height + 60, "password picker did not occupy layout space");
   await picker.getByRole("button", { name: /work@example.test/ }).focus();
   await page.keyboard.press("Enter");
   await page.getByRole("status").filter({ hasText: "已填写" }).waitFor();
   assert.equal(filled, entries[0].id);
-  const filledHeight = (await page.locator(".browser-chrome").boundingBox()).height;
+  const filledHeight = (await vaultMenu.boundingBox()).height;
   const pickerHeight = (await picker.boundingBox()).height;
   await trigger.press("Escape");
   await picker.waitFor({ state: "hidden" });
-  assert.equal(Math.round((await page.locator(".browser-chrome").boundingBox()).height), Math.round(filledHeight - pickerHeight),
+  assert.equal(Math.round((await vaultMenu.boundingBox()).height), Math.round(filledHeight - pickerHeight),
     "closing the password picker releases its space while preserving the fill confirmation");
   candidate = { id: "pending", tab: "web-vault", origin: "https://mail.example.test", username: "work@example.test", password: "new-fixture-secret" };
   await page.getByText("更新此账号的密码？", { exact: true }).waitFor();

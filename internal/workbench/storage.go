@@ -66,6 +66,9 @@ func storageRecoveryRoute(r *http.Request) bool {
 		return true
 	}
 	if r.Method == http.MethodGet {
+		if strings.HasPrefix(path, "/api/agent/jobs/") {
+			return true
+		}
 		switch path {
 		case "/api/status", "/api/settings", "/api/appearance", "/api/favorites", "/api/proxy", "/api/agent/routes", "/api/environment/storage", "/api/environment/initialization":
 			return true

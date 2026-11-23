@@ -1,6 +1,6 @@
 module github.com/sylvinus/agent-vm
 
-go 1.26.10
+go 1.26.11
 
 // Bundled dependencies are built from third_party/. These replaces only apply when
 // this module is the main one, so `go install ...@latest` does not build

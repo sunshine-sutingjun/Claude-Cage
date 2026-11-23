@@ -85,7 +85,7 @@ func AgentOperations() []AgentOperation {
 	post("network.check", "Run existing safety checks; may reopen networking when checks pass", "/api/safety/check", object(nil))
 	post("network.pause", "Close external networking and persist pause intent", "/api/safety/close", object(nil))
 	post("project.open", "Grant access only to a user-authorized directory; add=true remembers the grant", "/api/projects/open", object(map[string]string{"workspace": "string", "add": "boolean", "activate": "boolean"}))
-	post("project.save", "Save a named project with user-authorized folders. For a new project, omit workspace; the first folder becomes its stable default directory. To edit, provide its existing workspace and keep that folder. Returns approval if macOS authorization is needed; retry the same request after approval", "/api/projects/save", from(projectGroup{}))
+	post("project.save", "Save a named project with authorized folders. Set folder_modes by path to read or write. Omitted modes preserve previous grants and default to write for new folders. On create omit workspace to use the first folder as its default. On edit retain the default folder. Retry the same request after macOS approval", "/api/projects/save", from(projectGroup{}))
 	post("project.remove", "Remove a project and revoke every bound folder share. Close its terminals, running sessions and editors first. Preserve files and history", "/api/projects/remove", object(map[string]string{"workspace": "string"}))
 	post("project.refresh", "Linux guests only: forget cached names and attributes of project files so host-side changes show at once", "/api/projects/refresh", object(nil))
 
@@ -133,7 +133,7 @@ func AgentOperations() []AgentOperation {
 	get("favorites.get", "Read bookmarks and folders", "/api/favorites")
 	post("favorites.change", "Save, move, reorder or delete using the same collection owner", "/api/favorites", from(favoriteChange{}))
 	get("terminals.get", "Read terminal sessions", "/api/terminals")
-	post("terminals.create", "Create the same shell/Claude terminal as the UI", "/api/terminals", from(terminalRequest{}))
+	post("terminals.create", "Start a shell or Claude terminal in an authorized project or in the guest-only directory identified by status.guest_workspace", "/api/terminals", from(terminalRequest{}))
 	get("client.context", "Read the desktop connection generation; use desktop scope", "/api/client/context")
 	get("client.hosts", "Read saved SSH hosts; use desktop scope", "/api/client/hosts")
 	post("client.hosts.create", "Save an SSH host through the desktop store", "/api/client/hosts", from(remotehost.HostProfile{}))
@@ -287,8 +287,12 @@ func agentRequest(ctx context.Context, configPath, method, path string, input js
 
 func (s *Server) agentRoutes(mux routeRegistrar) {
 	mux.HandleFunc("GET /api/agent/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		job := s.jobs.snapshot()
-		if job.ID == "" || job.ID != r.PathValue("id") {
+		job, found, err := s.jobs.byID(r.PathValue("id"))
+		if err != nil {
+			requestError(w, err)
+			return
+		}
+		if !found {
 			http.Error(w, "Original job no longer available", http.StatusGone)
 			return
 		}

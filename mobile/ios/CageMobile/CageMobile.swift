@@ -152,7 +152,11 @@ final class ConnectionModel: ObservableObject {
         } catch { status = "文件无效或临时邀请已过期，请重新导入。" }
     }
     func forget() {
-        do { try HostKeychain.forget(host: trusted) } catch { status = "移除未完成，请解锁手机后重试。"; return }
+        guard let host = trusted else {return}
+        do { try HostKeychain.forget(host: host) } catch { status = "移除未完成，请解锁手机后重试。"; return }
+        generation += 1
+        connecting = false
+        disconnectDevice(host.relay + "|" + host.pin)
         UserDefaults.standard.removeObject(forKey: trustKey)
         trusted = nil; imported = nil; invitation = nil; relay = UserDefaults.standard.string(forKey:"preferred-relay") ?? CMConnection.defaultRelay(); pin = ""
         hasSaved = false; needsTrust = false; verified = false; hasInvitation = false

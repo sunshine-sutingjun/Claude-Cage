@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lima-vm/sshocker/pkg/reversesshfs"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 
 	"al.essio.dev/pkg/shellescape"
@@ -50,7 +50,7 @@ func macOSProjectPrepareError(err error) error {
 	return &projectShareError{Recovery: "project-retry", Message: "工作台暂时无法连接客机项目服务。连接恢复后会自动重试，也可以重新连接项目。"}
 }
 
-func (s *Server) ensureMacOSProjectShare(hostDir string) error {
+func (s *Server) ensureMacOSProjectShare(hostDir string, readonly bool) error {
 	ctx, cancel := context.WithTimeout(s.operationContext(), 18*time.Second)
 	defer cancel()
 	guestDir := macOSProjectPath(s.macosGuest.User, hostDir)
@@ -67,7 +67,7 @@ func (s *Server) ensureMacOSProjectShare(hostDir string) error {
 	}
 	if share == nil {
 		var err error
-		share, err = s.startMacOSProjectShare(ctx, hostDir, guestDir)
+		share, err = s.startMacOSProjectShare(ctx, hostDir, guestDir, readonly)
 		if err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func (s *Server) ensureMacOSProjectShare(hostDir string) error {
 	return err
 }
 
-func (s *Server) startMacOSProjectShare(ctx context.Context, hostDir, guestDir string) (*projectShare, error) {
+func (s *Server) startMacOSProjectShare(ctx context.Context, hostDir, guestDir string, readonly bool) (*projectShare, error) {
 	folder := shellescape.Quote(guestDir)
 
 	prepare := `set -e; ` + macProjectLoginCheck + ` || exit 73
@@ -129,7 +129,11 @@ func (s *Server) startMacOSProjectShare(ctx context.Context, hostDir, guestDir s
 	cmd := s.sshCommand(s.lifetimeContext(), "-T", s.sshTarget(), "--", command)
 	stderr := &fileControlStderr{}
 	cmd.Stderr = stderr
-	conn, err := startProjectTransport(cmd, hostDir)
+	var probe *reversesshfs.ProjectMountProbe
+	if readonly {
+		probe = newProjectMountProbe()
+	}
+	conn, err := startProjectTransport(cmd, hostDir, probe)
 	if err != nil {
 		return nil, err
 	}
@@ -192,17 +196,12 @@ func macOSLegacyMountID(data []byte) (string, error) {
 }
 
 func (s *Server) probeMacOSProject(ctx context.Context, hostDir, guestDir string, share *projectShare) error {
-	probe, err := os.CreateTemp(hostDir, ".cage-mount-probe-*")
+	name, challenge, cleanup, err := prepareProjectMountProbe(hostDir, share.probe)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(probe.Name())
-	challenge := randomToken()
-	_, writeErr := probe.WriteString(challenge)
-	if err := errors.Join(writeErr, probe.Close()); err != nil {
-		return err
-	}
-	cmd := shellescape.QuoteCommand([]string{macProjectAgent, "probe", guestDir, filepath.Base(probe.Name()), challenge})
+	defer cleanup()
+	cmd := shellescape.QuoteCommand([]string{macProjectAgent, "probe", guestDir, name, challenge})
 	for {
 		output, err := s.guest(ctx, cmd)
 		if err == nil && strings.TrimSpace(string(output)) == "OK" {

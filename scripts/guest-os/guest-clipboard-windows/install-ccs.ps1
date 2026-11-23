@@ -50,27 +50,51 @@ function PrivateDirectory([string]$Path) {
     if(-not (Test-Path -LiteralPath $Path)){New-Item -ItemType Directory -Path $Path | Out-Null}
     Assert-NoReparse $Path;Protect-Path $Path $true
 }
+$archiveSha='27a445fb98f947d5c9975fbed70f91f44a67943f2c3b0e38b30e2346103788c7'
+$manifestSha='ee8a1afc7e08a1e27c582359040571b248d1e932eca27d0880a03597430920c3'
+function Assert-CCSTree([string]$Root) {
+    Assert-NoReparse $Root
+    $manifestFile=Join-Path $Root 'runtime-files.json'
+    Assert-NoReparse $manifestFile
+    if ((Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash -ne $manifestSha) { throw 'CCS runtime manifest checksum failed.' }
+    $files=Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $expected=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $files.PSObject.Properties) { $expected.Add($entry.Name,$entry.Value) }
+    $directories=[Collections.Generic.Stack[string]]::new()
+    $directories.Push($Root)
+    while ($directories.Count -gt 0) {
+        foreach ($item in (Get-ChildItem -LiteralPath $directories.Pop() -Force)) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A CCS runtime path is a reparse point.' }
+            if ($item.PSIsContainer) { $directories.Push($item.FullName); continue }
+            if ($item.FullName -ceq $manifestFile) { continue }
+            $name=$item.FullName.Substring($Root.Length+1).Replace('\','/')
+            if (-not $expected.ContainsKey($name) -or (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ne $expected[$name]) {
+                throw 'Unexpected or changed CCS runtime file.'
+            }
+            [void]$expected.Remove($name)
+        }
+    }
+    if ($expected.Count -ne 0) { throw 'Missing CCS runtime file.' }
+}
 Assert-NoReparse $RuntimeArchive;Assert-NoReparse $NodeArchive;Assert-NoReparse $bridge
-if ((Get-FileHash $RuntimeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a0ab3bbac6b2c14ba53020474a4d6a6b307b9faf6f10998568b3200535c6b3e7') { throw 'CCS runtime archive checksum failed.' }
 if ((Get-FileHash $NodeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2') { throw 'Official Node archive checksum failed.' }
 $tools=Join-Path $env:USERPROFILE 'Cage\CLI\tools';PrivateDirectory $tools
-$runtime=Join-Path $tools 'ccs\8.11.0'
-if (-not (Test-Path -LiteralPath $runtime)) {
-    $parent=Split-Path $runtime -Parent;PrivateDirectory $parent
-    $stage=Join-Path $parent ('stage-'+[Guid]::NewGuid().ToString('N'));PrivateDirectory $stage
-    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xzf $RuntimeArchive -C $stage
-    if($LASTEXITCODE -ne 0){throw 'CCS archive extraction failed; staged files were retained.'}
-    [IO.Directory]::Move($stage,$runtime)
-}
-Assert-NoReparse $runtime
+$runtime=Join-Path $tools ('ccs\8.11.0-'+$manifestSha.Substring(0,12))
+$archive=[IO.File]::Open($RuntimeArchive,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+try {
+    if ((Get-FileHash -InputStream $archive -Algorithm SHA256).Hash -ne $archiveSha) { throw 'CCS runtime archive checksum failed.' }
+    if (Test-Path -LiteralPath $runtime) {
+        Assert-CCSTree $runtime
+    } else {
+        $parent=Split-Path $runtime -Parent;PrivateDirectory $parent
+        $stage=Join-Path $parent ('stage-'+[Guid]::NewGuid().ToString('N'));PrivateDirectory $stage
+        & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $RuntimeArchive -C $stage
+        if($LASTEXITCODE -ne 0){throw 'CCS archive extraction failed; staged files were retained.'}
+        Assert-CCSTree $stage
+        [IO.Directory]::Move($stage,$runtime)
+    }
+} finally { $archive.Dispose() }
 $manifest=Join-Path $runtime 'runtime-files.json'
-$files=Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-foreach($entry in $files.PSObject.Properties) {
-    $file=[IO.Path]::GetFullPath((Join-Path $runtime $entry.Name))
-    if(-not $file.StartsWith($runtime+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'CCS runtime contains an invalid path.'}
-    Assert-NoReparse $file
-    if((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value){throw 'A CCS runtime file changed.'}
-}
 $nodeSha='1c331340fa6cac5e4294725959070a143fa0507195a78ad77eed7943f719aac9'
 if ($ExistingNode -ne '') {
     Assert-NoReparse $ExistingNode
@@ -90,7 +114,7 @@ $receiptDir=[IO.Path]::GetFullPath($ReceiptDirectory)
 $allowed=[IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Cage\CLI'))
 if(-not $receiptDir.StartsWith($allowed+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Receipt staging must stay in the current user Cage CLI directory.'}
 PrivateDirectory $receiptDir
-$receipt=[ordered]@{version=1;node=$node;node_version='24.22.2';node_sha256=$nodeSha;main=$main;main_sha256=(Get-FileHash $main -Algorithm SHA256).Hash.ToLowerInvariant();manifest=$manifest;manifest_sha256=(Get-FileHash $manifest -Algorithm SHA256).Hash.ToLowerInvariant();ccs_version='8.11.0'}
+$receipt=[ordered]@{version=1;node=$node;node_version='24.22.2';node_sha256=$nodeSha;main=$main;main_sha256=(Get-FileHash -LiteralPath $main -Algorithm SHA256).Hash.ToLowerInvariant();manifest=$manifest;manifest_sha256=$manifestSha;ccs_version='8.11.0'}
 $temporary=Join-Path $receiptDir ('ccs-tools.'+[Guid]::NewGuid().ToString('N')+'.json')
 [IO.File]::WriteAllText($temporary,($receipt | ConvertTo-Json),(New-Object Text.UTF8Encoding($false)))
 Protect-Path $temporary $false

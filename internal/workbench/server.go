@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -113,6 +114,7 @@ type Server struct {
 	mobileConnectMu                                  sync.Mutex
 	audioClients                                     int
 	projectShares                                    map[string]*projectShare
+	pendingProjectGroup                              *pendingProjectGroup
 	projectErrors                                    []projectShareError
 	clientMounts                                     map[string]*guestClientMount
 	clientWorkspace                                  string
@@ -195,6 +197,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	}
 	defer listener.Close()
 	s := &Server{profile: profile, configPath: configPath, exe: exe, clientOnly: clientOnly, origin: fmt.Sprintf("http://localhost:%d", port), token: randomToken(), session: randomToken(), preferences: Preferences{Keyboard: defaultKeyboard(), AutoTimezone: true, AutoLanguage: true, BalancedDisplay: true, ProjectFileCache: true}}
+	s.jobs.receipts.path = filepath.Join(profile, jobReceiptFile)
 	s.desktopEntry = fullConfigPath != ""
 	s.appUpdateConfigPath = configPath
 	if fullConfigPath != "" {
@@ -351,7 +354,7 @@ func (s *Server) handler() http.Handler {
 		if !s.launcherAuthenticated(w, r) {
 			return
 		}
-		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.identity})
+		jsonReply(w, launchResponse{DeviceSessions: true, ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.identity})
 	})
 	if s.desktopEntry || s.clientOnly {
 		mux.HandleFunc("POST /api/handoff", s.handoffEntry)
@@ -370,7 +373,7 @@ func (s *Server) handler() http.Handler {
 		if !readJSON(w, r, &v) {
 			return
 		}
-		if !s.consumeTicket(v.Token) {
+		if !s.exchangeSessionTicket(w, r, v.Token) {
 			http.Error(w, "访问凭证无效，请从 Cage 应用重新打开。", http.StatusUnauthorized)
 			return
 		}
@@ -512,14 +515,21 @@ func (s *Server) handler() http.Handler {
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
-		if (r.Method != "GET" && r.Method != "HEAD") || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-			if r.Header.Get("Origin") != s.origin {
-				http.Error(w, "Origin refused", 403)
-				return
-			}
+		hasAPIPath := strings.HasPrefix(r.URL.Path, "/api/")
+		requestOrigin := r.Header.Get("Origin")
+		requiresOrigin := (r.Method != http.MethodGet && r.Method != http.MethodHead) || strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+		if (requiresOrigin || (hasAPIPath && requestOrigin != "")) && requestOrigin != s.origin {
+			http.Error(w, "Origin refused", http.StatusForbidden)
+			return
+		}
+		// Browser GETs can omit Origin even when initiated by another localhost port.
+		if site := r.Header.Get("Sec-Fetch-Site"); hasAPIPath && (site == "same-site" || site == "cross-site") {
+			http.Error(w, "Origin refused", http.StatusForbidden)
+			return
 		}
 		// Launcher-token routes are handled only by this listener, never by a
 		// selected workload. They perform their own authentication.
@@ -539,6 +549,14 @@ func (s *Server) handler() http.Handler {
 			c, e := r.Cookie(s.cookieName())
 			if e != nil || !equalSecret(c.Value, s.session) {
 				http.Error(w, "请从 Cage 应用重新打开工作台", 401)
+				return
+			}
+		}
+		// Verify the native caller before a gateway can attach its private upstream cookies.
+		if nativeDeviceRoute(r.URL.Path) {
+			cookie, err := r.Cookie(s.cookieName() + "-device")
+			if err != nil || !equalSecret(cookie.Value, deviceMAC(s.token, "cookie")) {
+				http.Error(w, "请使用已更新的 Cage 原生窗口管理快捷登录", http.StatusForbidden)
 				return
 			}
 		}
@@ -647,7 +665,8 @@ func (s *Server) handler() http.Handler {
 	})
 }
 func readJSON(w http.ResponseWriter, r *http.Request, v any, limits ...int64) bool {
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		http.Error(w, "需要 JSON 请求", 415)
 		return false
 	}
@@ -710,6 +729,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"keyboard":         s.preferences.Keyboard, "auto_timezone": s.preferences.AutoTimezone, "job": s.jobs.snapshot(),
 		"location": s.location, "network_error": s.currentNetworkErrorLocked(), "can_restore": e == nil,
 		"safety": s.safety, "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
+	}
+	if s.guestWorkspaceAvailable() {
+		view["guest_workspace"] = guestWorkspaceID
 	}
 	if s.windowsGuest != nil {
 		view["guest_system"] = guestos.Windows11

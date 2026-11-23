@@ -99,6 +99,60 @@ func (se *startEnv) base() {
 	os.WriteFile(se.state.Path(state.BaseBuiltBy), []byte("0.3.0\n"), 0o644)
 }
 
+func TestSingleFileVolumeChangeRequiresStoppedVMAndClearsOldSlot(t *testing.T) {
+	se := newStartEnv(t)
+	se.base()
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := filepath.Join(se.home, "first.txt")
+	next := filepath.Join(se.home, "next.txt")
+	write(first, "first")
+	write(next, "next")
+	write(se.state.Path("volumes"), first+":/guest/first:ro\n")
+	if se.run("run", "true") != 0 {
+		t.Fatal(se.out())
+	}
+	inst := se.fake.VMs[vmname.Name(se.proj)]
+	stage := inst.Mounts[1].Location
+	checkSlot := func(want string) {
+		t.Helper()
+		entries, err := os.ReadDir(stage)
+		if err != nil || len(entries) != 1 || entries[0].Name() != want {
+			t.Fatalf("staged files %v, error %v, want only %s", entries, err, want)
+		}
+	}
+	checkSlot("first.txt")
+	write(se.state.Path("volumes"), next+":/guest/next:ro\n")
+	se.g.ran = nil
+	if se.run("run", "true") == 0 || inst.Status != vm.Running || len(se.g.ran) != 0 {
+		t.Fatalf("reused or changed the running instance after file selection changed: %s", se.out())
+	}
+	checkSlot("first.txt")
+	inst.Status = vm.Stopped
+	write(filepath.Join(stage, "legacy-extra.txt"), "old staged content")
+	if se.run("run", "true") != 0 {
+		t.Fatal(se.out())
+	}
+	checkSlot("next.txt")
+	if got, err := os.ReadFile(first); err != nil || string(got) != "first" {
+		t.Fatalf("original host file changed: %q, %v", got, err)
+	}
+	if marker := se.state.ReadMarker(state.FileMountsOf, inst.Name); !strings.Contains(marker, "/guest/next") || strings.Contains(marker, "/guest/first") {
+		t.Fatalf("old guest binding survived restart: %q", marker)
+	}
+	write(se.state.Path("volumes"), "")
+	if err := os.Remove(se.state.Marker(state.FileMountsOf, inst.Name)); err != nil {
+		t.Fatal(err)
+	}
+	if se.run("run", "true") == 0 || inst.Status != vm.Running {
+		t.Fatalf("reused a live file mount with its record missing: %s", se.out())
+	}
+}
+
 func TestCageRefusesSecondActiveEnvironment(t *testing.T) {
 	se := newStartEnv(t)
 	se.base()
@@ -316,18 +370,72 @@ func TestResourcesDiffer(t *testing.T) {
 	}
 }
 
-// A folder left without lima.yaml by an interrupted creation is cleaned up.
-func TestStartPartialVM(t *testing.T) {
+func TestStartRecoversEmptyInstanceDirectory(t *testing.T) {
 	se := newStartEnv(t)
 	se.base()
 	d := filepath.Join(LimaHome(se.state), vmname.Name(se.proj))
-	os.MkdirAll(d, 0o755)
-	os.WriteFile(filepath.Join(d, "basedisk"), nil, 0o644)
-	if se.run("run", "true") != 0 || !strings.Contains(se.out(), "Detected partial VM state at "+d) {
-		t.Errorf("partial: %s", se.out())
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(d, "basedisk")); err == nil {
-		t.Error("left")
+	if se.run("run", "true") != 0 || !strings.Contains(se.fake.CallLog(), "clone base ") {
+		t.Fatalf("could not retry creation: %s", se.out())
+	}
+	// The fake clone doesn't create its target on disk. Real Lima requires
+	// the empty directory to be gone before it will clone.
+	if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty clone target still exists: %v", err)
+	}
+}
+
+func TestStartPreservesUnconfiguredInstance(t *testing.T) {
+	for _, tc := range []struct{ disk, config string }{
+		{"diffdisk", "missing"},
+		{"basedisk", "missing"},
+		{"diffdisk", "directory"},
+		{"diffdisk", "unreadable"},
+		{"diffdisk", "symlink-loop"},
+	} {
+		t.Run(tc.disk+"-"+tc.config, func(t *testing.T) {
+			se := newStartEnv(t)
+			se.base()
+			dir := filepath.Join(LimaHome(se.state), vmname.Name(se.proj))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			disk := filepath.Join(dir, tc.disk)
+			const payload = "existing guest data"
+			if err := os.WriteFile(disk, []byte(payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(dir, "lima.yaml")
+			switch tc.config {
+			case "directory":
+				if err := os.Mkdir(config, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				if err := os.WriteFile(config, []byte("existing configuration"), 0); err != nil {
+					t.Fatal(err)
+				}
+				if f, err := os.Open(config); err == nil {
+					f.Close()
+					t.Skip("this account can read files with mode 000")
+				}
+			case "symlink-loop":
+				if err := os.Symlink("lima.yaml", config); err != nil {
+					t.Skipf("cannot create test symlink: %v", err)
+				}
+			}
+			if se.run("run", "true") == 0 || !strings.Contains(se.out(), dir) || !strings.Contains(se.out(), "retry") {
+				t.Fatalf("expected a recovery message for %s: %s", dir, se.out())
+			}
+			if se.fake.CallLog() != "" {
+				t.Fatalf("changed VM after a configuration failure: %s", se.fake.CallLog())
+			}
+			if got, err := os.ReadFile(disk); err != nil || string(got) != payload {
+				t.Fatalf("disk contents %q, error %v", got, err)
+			}
+		})
 	}
 }
 

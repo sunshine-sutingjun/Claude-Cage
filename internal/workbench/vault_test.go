@@ -187,6 +187,15 @@ func TestVaultOriginAndDuplicateUpdate(t *testing.T) {
 	if len(db.Entries) != 1 || db.Entries[0].Password != "old" {
 		t.Fatal("blank edit lost existing password")
 	}
+	original := db.Entries[0]
+	edit := vaultEntry{ID: original.ID, Origin: "https://new.example", Username: original.Username}
+	if err := db.save(edit); err == nil || db.Entries[0] != original {
+		t.Fatal("changing sites requires a password for the new site")
+	}
+	edit.Password = "new-site-password"
+	if err := db.save(edit); err != nil || db.Entries[0].Password != edit.Password || db.Entries[0].Origin != edit.Origin {
+		t.Fatal("could not save the explicitly supplied credential for the new site", err)
+	}
 	if err := db.save(vaultEntry{Origin: "https://mail.example.com", Username: "bob", Password: "other"}); err != nil {
 		t.Fatal(err)
 	}

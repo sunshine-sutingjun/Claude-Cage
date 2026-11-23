@@ -271,6 +271,7 @@ func connect(lifetime context.Context, p HostProfile, secrets ConnectSecrets, ph
 	manifest.Ticket = ""
 	req, _ := http.NewRequestWithContext(ready, "POST", s.Origin+"/api/session", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Cage-Native-Device", "1")
 	response, err := s.Client.Do(req)
 	clear(body)
 	if err != nil {

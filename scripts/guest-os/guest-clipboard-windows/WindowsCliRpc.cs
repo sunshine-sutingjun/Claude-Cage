@@ -57,7 +57,12 @@ internal static class WindowsCliRpc
             else
             {
                 var id=request["project_id"]?.GetValue<string>()??"";var grant=request["grant"]?.GetValue<string>()??"";
-                if(sandbox is null)
+                if(request["workspace"]?.GetValue<string>()=="guest")
+                {
+                    if(sandbox is not null || id!="" || grant!="")throw new InvalidDataException("cli_guest_workspace_invalid");
+                    directory=TerminalRpc.OpenGuestWorkspace();open["workspace"]="guest";
+                }
+                else if(sandbox is null)
                 { directory=ProjectRpc.Resolve(id,grant);open["workspace"]="project";open["project_id"]=id;open["grant"]=grant; }
                 else if(id!=""||grant!="")throw new InvalidDataException("headless_project_not_granted");
                 var payload=request["conversation"]?.DeepClone() as JsonObject??throw new InvalidDataException("cli_conversation_invalid");
@@ -200,25 +205,24 @@ internal static class WindowsCliRpc
     {
         var receipt=Path.Combine(AppContext.BaseDirectory,"ccs-tools.json");Pairing.PrivateFile(receipt);
         var value=JsonNode.Parse(File.ReadAllBytes(receipt))as JsonObject??throw new InvalidDataException("ccs_tools_invalid");
-        string Check(string name)
+        const string nodeSha = "1c331340fa6cac5e4294725959070a143fa0507195a78ad77eed7943f719aac9";
+        if (value["manifest_sha256"]?.GetValue<string>() != CCSRuntime.ManifestSha || value["node_sha256"]?.GetValue<string>() != nodeSha)
+            throw new InvalidDataException("ccs_tools_update_required");
+        string ReceiptPath(string name)
         {
-            var path=value[name]?.GetValue<string>()??"";var hash=value[name+"_sha256"]?.GetValue<string>()??"";
-            if(!Path.IsPathFullyQualified(path)||!Subject.IsMatch(hash)||!File.Exists(path)||new FileInfo(path).Attributes.HasFlag(FileAttributes.ReparsePoint))throw new InvalidDataException("ccs_tools_invalid");
-            using var data=File.OpenRead(path);if(Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant()!=hash)throw new InvalidDataException("ccs_tools_changed");
+            var path = value[name]?.GetValue<string>() ?? "";
+            if (!Path.IsPathFullyQualified(path) || !File.Exists(path) || File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException("ccs_tools_invalid");
+            for (var dir = new FileInfo(path).Directory; dir != null; dir = dir.Parent)
+                if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint)) throw new InvalidDataException("ccs_tools_invalid");
             return Path.GetFullPath(path);
         }
-        var node=Check("node");var main=Check("main");var manifest=Check("manifest");
-        if(new FileInfo(manifest).Length>2<<20)throw new InvalidDataException("ccs_manifest_invalid");
-        var files=System.Text.Json.JsonSerializer.Deserialize<Dictionary<string,string>>(File.ReadAllBytes(manifest))??throw new InvalidDataException("ccs_manifest_invalid");
-        if(files.Count is <1 or >20000)throw new InvalidDataException("ccs_manifest_invalid");
-        var root=Path.GetDirectoryName(manifest)!;
-        foreach(var item in files)
-        {
-            var path=Path.GetFullPath(Path.Combine(root,item.Key.Replace('/',Path.DirectorySeparatorChar)));
-            if(!path.StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||!Subject.IsMatch(item.Value)||new FileInfo(path).Attributes.HasFlag(FileAttributes.ReparsePoint))throw new InvalidDataException("ccs_manifest_invalid");
-            using var data=File.OpenRead(path);if(Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant()!=item.Value)throw new InvalidDataException("ccs_tools_changed");
-        }
-        if(!main.StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("ccs_tools_invalid");
+        var node = ReceiptPath("node");
+        using (var data = File.OpenRead(node))
+            if (Convert.ToHexStringLower(SHA256.HashData(data)) != nodeSha) throw new InvalidDataException("ccs_tools_changed");
+        var main = ReceiptPath("main");
+        var manifest = ReceiptPath("manifest");
+        CCSRuntime.Verify(manifest, main, value["main_sha256"]?.GetValue<string>());
         return new(node,main);
     }
     private static Dictionary<string,string> EnvironmentFor(Layout layout,string account)
@@ -238,7 +242,15 @@ internal static class WindowsCliRpc
     {
         if(value["workspace"] is JsonValue w&&w.TryGetValue<string>(out var workspace)&&workspace!="")
         {
-            var resolved=layout.Sandbox?.Home??ProjectRpc.Resolve(value["project_id"]?.GetValue<string>()??"",value["grant"]?.GetValue<string>()??"");
+            var id=value["project_id"]?.GetValue<string>()??"";
+            var grant=value["grant"]?.GetValue<string>()??"";
+            string resolved;
+            if(value["guest_workspace"]?.GetValue<bool>()==true)
+            {
+                if(layout.Sandbox is not null || id!="" || grant!="")throw new InvalidDataException("cli_guest_workspace_invalid");
+                resolved=TerminalRpc.OpenGuestWorkspace();
+            }
+            else resolved=layout.Sandbox?.Home??ProjectRpc.Resolve(id,grant);
             if(!Path.GetFullPath(workspace).Equals(Path.GetFullPath(resolved),StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("cli_project_unregistered");
         }
         if(value["config"]is JsonValue c&&c.TryGetValue<string>(out var config)&&config!="")

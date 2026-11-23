@@ -109,6 +109,7 @@ internal static class Program
     {
         var status = agent.Hello(); status["vm_id"] = vm.ToString("D"); status["gui_user_sid"] = sid;
         status["reason"] = SessionGuard.Available() ? "" : "requires_gui_login";
+        status["guest_workspace"] = TerminalRpc.GuestWorkspacePath;
         status["capabilities"] = JsonSerializer.SerializeToNode(GuestOperations.Capabilities());
         status["setup_account_disabled"] = SetupAccount.Disabled();
         var browser=BrowserRpc.Status();status["browser"]=browser;

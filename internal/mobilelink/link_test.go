@@ -325,6 +325,7 @@ func TestLocalBrowserSessionAndHostHeaders(t *testing.T) {
 	t.Cleanup(web.Close)
 	entry, _ := url.Parse(launch)
 	body, _ := json.Marshal(map[string]string{"token": entry.Fragment})
+	var apiToken string
 	call := func(method, path, ref string, cookie *http.Cookie, data []byte) *http.Response {
 		t.Helper()
 		req, _ := http.NewRequest(method, origin+path, bytes.NewReader(data))
@@ -333,6 +334,9 @@ func TestLocalBrowserSessionAndHostHeaders(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer untrusted-browser-value")
+		if apiToken != "" {
+			req.Header.Set("X-Cage-Mobile-Session", apiToken)
+		}
 		if cookie != nil {
 			req.AddCookie(cookie)
 			req.AddCookie(&http.Cookie{Name: "cage_session_host", Value: "untrusted-browser-value"})
@@ -363,6 +367,13 @@ func TestLocalBrowserSessionAndHostHeaders(t *testing.T) {
 	}
 	if res := call("POST", "/link-session", origin, nil, body); res.StatusCode != 401 {
 		t.Fatal("bootstrap was usable twice")
+	}
+	if res := call("GET", "/api/mobile/cli/projects", "", cookies[0], nil); res.StatusCode != 401 {
+		t.Fatal("browser cookie alone authorized a mobile operation")
+	}
+	apiToken = res.Header.Get("X-Cage-Mobile-Session")
+	if apiToken == "" || apiToken == cookies[0].Value {
+		t.Fatal("bootstrap did not issue a separate API credential")
 	}
 	for _, path := range []string{"/", "/?page=archived", "/api/mobile/cli/projects"} {
 		res = call("GET", path, "", cookies[0], nil)

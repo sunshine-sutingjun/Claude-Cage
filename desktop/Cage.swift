@@ -398,7 +398,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             accountDeviceBusy = true
             let kind = body["kind"] as? String
             let connection = body["connection_id"] as? String ?? "local"
-            requestEntry { result in
+            requestEntry(options: ["--native-device"]) { result in
                 guard case .success(let entry) = result, let url = entry.url else {
                     self.accountDeviceBusy = false; replyHandler(nil,"无法连接本地账户，请重新打开 Cage"); return
                 }

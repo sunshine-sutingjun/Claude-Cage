@@ -169,7 +169,9 @@ cage agent call network.check --wait 5m
 
 以 `status.ready`、`vm_running` 以及 `safety` 中当前配置对应的网络检查与授权共同判断可用性；`proxy.status.network_open` 可辅助检查外网是否已放行。网络暂停时保持用户的暂停意图，只有用户要求恢复联网才运行 `network.check`。完成首次引导使用 `initialization.set` 的 `{"action":"complete"}`，后台会再次核对环境与网络状态。
 
-打开项目使用 `project.open`：`{"workspace":"用户授权的绝对路径","add":true,"activate":true}`。它会让客机访问这个目录，改动会影响主机文件。返回 `approval` 表示等待系统授权；Agent 可以调用相同的 `/api/macos/project-approval` 查看、操作该窗口。Claude 的服务登录仍在 Cage 内的官方工具中完成；本接口不会导入主机 Claude 凭据。
+在本机虚拟机内开始任务时，可把 `status` 返回的 `guest_workspace` 作为 `terminals.create` 的 `workspace`，并将 `kind` 设为 `shell` 或 `claude`。这个入口把文件保存在客机磁盘。
+
+共享本机目录时，用 `project.save` 一次提交文件夹和用户授予的权限。例如 `{"name":"代码审阅","folders":["/work/reference","/work/output"],"folder_modes":{"/work/reference":"read","/work/output":"write"}}`。省略权限时，已有目录沿用上次授权，新目录默认为读写。也可用 `project.open` 直接添加读写目录，传入 `{"workspace":"用户授权的绝对路径","add":true,"activate":true}`。返回 `approval` 表示等待 macOS 系统授权，完成后重新提交原请求。Claude 的服务登录在 Cage 内的官方工具中完成。
 
 移除已添加项目使用 `project.remove`，传入 `{"workspace":"项目列表中的路径"}`。关闭该目录的终端、运行中会话和编辑器后可解除共享，原文件与会话历史保留。移除当前项目后切换到剩余项目；移除最后一个项目后没有当前项目。
 
@@ -197,7 +199,7 @@ cage agent job 012345abcdef
 cage agent job 012345abcdef --wait 30m
 ```
 
-`--wait` 为有限等待，范围为 0 到 24 小时；不指定时立即返回。等待或客户端断开不会自动取消作业。后台只保留最近一个作业，后续作业会替换查询记录，重启也可能失去记录。`job_not_found`、`outcome_unknown` 或连接中断后，先读 `status` 和相应配置，核对副作用；不要把其他任务成功当成原任务成功。`job_canceled` 单独表示取消，不能视为完成。
+`--wait` 接受 0 到 24 小时，省略时立即返回。等待超时或客户端断开后，后台作业仍可继续运行。后台保留最近 64 个已受理作业的回执。断线、提交新操作或后台重启后，可用原 ID 查询。当前作业提供实时进度和日志。历史回执提供作业类型、结果、阶段摘要、已保存设置标记及可识别的脱敏失败原因。后台在确认结果前中断时，查询返回 `outcome_unknown`（结果待核对）。超过保留数量的旧 ID 返回 `job_not_found`。如果当前作业标记 `receipt_unavailable:true`，说明磁盘写入失败，断线前请记下当前结果。收到 `job_not_found`、`outcome_unknown` 或连接中断后，先读 `status` 和相应配置，核对原操作的实际结果。已取消的作业返回 `job_canceled`。
 
 命名 call 的输入必须是单个 JSON 对象，最大 12 MiB；request 支持原始二进制文件流。未知命令和字段会被拒绝。能力清单的 `input_schema` 描述允许字段；当前平台、系统状态和字段组合仍由后台验证。错误说明经过脱敏，正常业务结果保持接口原值。用户可以查看的密码、Cookie、配对码等，在同样的再次验证和权限检查通过后也可由 Agent 读取，应通过私有管道处理，避免默认记录或回显。
 

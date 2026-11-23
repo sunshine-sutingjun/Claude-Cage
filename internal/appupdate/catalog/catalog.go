@@ -128,6 +128,16 @@ func (c Candidate) SHA256(b []byte) (string, error) {
 		}
 		return hash, nil
 	}
+	if c.Checksums.Digest != "" {
+		expected, err := DigestValue(c.Checksums.Digest)
+		if err != nil {
+			return "", err
+		}
+		actual := sha256.Sum256(b)
+		if expected != hex.EncodeToString(actual[:]) {
+			return "", errors.New("校验清单与发行信息中的 SHA-256 不一致")
+		}
+	}
 	found := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		fields := strings.Fields(line)

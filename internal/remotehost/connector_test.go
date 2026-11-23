@@ -176,6 +176,9 @@ func fixtureHandler(t *testing.T, next http.Handler) http.Handler {
 				return
 			}
 			http.SetCookie(w, &http.Cookie{Name: "remote_session", Value: "private-cookie", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+			if r.Header.Get("X-Cage-Native-Device") == "1" {
+				http.SetCookie(w, &http.Cookie{Name: "remote_device", Value: "fixture", Path: "/api/account/", HttpOnly: true})
+			}
 			io.WriteString(w, `{"ok":true}`)
 			return
 		}
@@ -202,6 +205,12 @@ func TestSSHSessionHTTPWebSocketSSEAndCancellation(t *testing.T) {
 	sseEnded := make(chan struct{})
 	f := newFixture(t, fixtureHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/account/device-revoke":
+			if _, err := r.Cookie("remote_device"); err != nil {
+				http.Error(w, "device session missing", http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 		case "/check":
 			io.WriteString(w, "authenticated")
 		case "/stream":
@@ -225,6 +234,14 @@ func TestSSHSessionHTTPWebSocketSSEAndCancellation(t *testing.T) {
 		}
 	})))
 	s := connectFixture(t, f)
+	device, err := s.Client.Post(s.Origin+"/api/account/device-revoke", "application/json", strings.NewReader(`{"kind":"automatic"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	device.Body.Close()
+	if device.StatusCode != http.StatusOK || device.Header.Get("Set-Cookie") != "" {
+		t.Fatal("SSH transport did not keep its native device authorization in its private jar")
+	}
 	if command := <-f.commands; command != "exec 'cage' server-entry --json" {
 		t.Fatalf("command = %q", command)
 	}

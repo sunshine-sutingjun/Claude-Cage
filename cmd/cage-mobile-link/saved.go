@@ -156,7 +156,7 @@ func revoke(state string) error {
 	return nil
 }
 
-var errRevoked = errors.New("saved device trust changed; host bridge closed")
+var errRevoked = errors.New("device trust changed; connection closed")
 
 func verifySaved(state string, h savedHost) bool {
 	peer, err := trustedPeer(state)

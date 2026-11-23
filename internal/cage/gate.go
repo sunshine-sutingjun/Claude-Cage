@@ -123,6 +123,10 @@ func (g *EgressGate) SyncProxyRevision(cfg Config) error {
 		before.ExitPolicy, after.ExitPolicy = ExitPolicy{}, ExitPolicy{}
 	}
 	before.ProxyRevision, after.ProxyRevision = "", ""
+	// Reloading the same creation-time profile allocates a new pointer.
+	if before.GuestProfile != nil && after.GuestProfile != nil && *before.GuestProfile == *after.GuestProfile {
+		before.GuestProfile = after.GuestProfile
+	}
 	if before != after || cfg.ProxyRevision == "" {
 		g.mu.Unlock()
 		return errors.New("出口地址或环境设置变化需要重启环境")

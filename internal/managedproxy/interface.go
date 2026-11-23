@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
@@ -13,6 +14,66 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+// TransportInterface selects the socket binding used to reach the first proxy.
+func (s Store) TransportInterface(ctx context.Context) (string, error) {
+	if !s.FirstHopViaHostTunnel {
+		return PhysicalInterface(ctx)
+	}
+	if runtime.GOOS != "darwin" {
+		return "", errors.New("上游隧道绑定仅支持 macOS")
+	}
+	ip, err := s.tunnelFirstHop()
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/sbin/route", "-n", "get", "-inet", ip.String()).Output()
+	if err != nil {
+		return "", errors.New("无法查询首跳代理的 IPv4 路由，外网保持关闭")
+	}
+	return tunnelRouteInterface(string(out))
+}
+
+func (s Store) tunnelFirstHop() (netip.Addr, error) {
+	hops, err := s.Route()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if len(hops) == 0 {
+		return netip.Addr{}, errors.New("缺少上游隧道的首跳代理")
+	}
+	entry, _ := s.Find(hops[0])
+	server, _ := entry.Config["server"].(string)
+	ip, err := netip.ParseAddr(server)
+	if entry.Config["type"] != "socks5" || err != nil || !publicIP(ip) {
+		return netip.Addr{}, errors.New("上游隧道绑定需要首跳使用公网 IPv4 地址的 SOCKS5 节点")
+	}
+	return ip, nil
+}
+
+var macTunnelInterface = regexp.MustCompile(`^utun[0-9]+$`)
+
+func tunnelRouteInterface(route string) (string, error) {
+	var name, flags string
+	for _, line := range strings.Split(route, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[0] {
+		case "interface:":
+			name = fields[1]
+		case "flags:":
+			flags = "," + strings.Trim(fields[1], "<>") + ","
+		}
+	}
+	if !macTunnelInterface.MatchString(name) || !strings.Contains(flags, ",UP,") || strings.Contains(flags, ",REJECT,") || strings.Contains(flags, ",BLACKHOLE,") {
+		return "", errors.New("首跳代理缺少可用的 macOS 隧道路由，外网保持关闭")
+	}
+	return name, nil
+}
 
 // PhysicalInterface uses the system's preferred reachable IPv4 hardware port.
 // A route through utun is not a physical uplink, even when it is the default.

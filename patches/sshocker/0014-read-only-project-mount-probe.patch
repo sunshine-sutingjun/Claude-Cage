@@ -1,0 +1,200 @@
+diff --git a/pkg/reversesshfs/rooted.go b/pkg/reversesshfs/rooted.go
+index 23379b6..29a05dd 100644
+--- a/pkg/reversesshfs/rooted.go
++++ b/pkg/reversesshfs/rooted.go
+@@ -33,6 +33,7 @@ type rootedHandlers struct {
+ 	readonlyNames []string
+ 	foldedNames   []string // readonlyNames as FoldName gives them
+ 	guardRoot     string   // the served directory as Guard is told
++	mountProbe    *projectProbeFile
+ 	rootedSys
+ 
+ 	mu    sync.Mutex // protects relay
+@@ -85,6 +86,22 @@ func (h *rootedHandlers) Close() error {
+ 	return errors.Join(h.root.Close(), h.rootedSys.close())
+ }
+ 
++// ServeReadOnlyProject serves localPath with an in-memory mount probe.
++func ServeReadOnlyProject(transport io.ReadWriteCloser, localPath string, virtualRoot bool, probe ProjectMountProbe) error {
++	export := slashPath(localPath)
++	if virtualRoot {
++		export = "/"
++	}
++	server, root, err := newRootedServerAt(transport, localPath, export, true, nil)
++	if err != nil {
++		return err
++	}
++	defer root.Close()
++	defer server.Close()
++	root.mountProbe = &projectProbeFile{ProjectMountProbe: probe, created: time.Now()}
++	return server.Serve()
++}
++
+ // rel maps a request path to a path relative to the root.
+ // The result has no "." or ".." component, except "." for the root itself.
+ func (h *rootedHandlers) rel(p string) (string, error) {
+@@ -168,6 +185,9 @@ func (h *rootedHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if h.mountProbe != nil && rel == h.mountProbe.Name() {
++		return strings.NewReader(h.mountProbe.Challenge), nil
++	}
+ 	f, err := h.openRead(rel)
+ 	if err != nil {
+ 		return nil, err
+@@ -357,6 +377,9 @@ func (h *rootedHandlers) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+ 		}
+ 		return &dirLister{f: f}, nil
+ 	case "Stat":
++		if h.mountProbe != nil && rel == h.mountProbe.Name() {
++			return listerAt{h.mountProbe}, nil
++		}
+ 		// FSTAT: r.Filepath is where the file was opened, which may now be another file.
+ 		var f *os.File
+ 		switch hf := r.HandleFile().(type) {
+@@ -387,6 +410,9 @@ func (h *rootedHandlers) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if h.mountProbe != nil && rel == h.mountProbe.Name() {
++		return listerAt{h.mountProbe}, nil
++	}
+ 	fi, err := h.root.Lstat(rel)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/pkg/reversesshfs/rooted_others.go b/pkg/reversesshfs/rooted_others.go
+index 1fc4972..8e79ef5 100644
+--- a/pkg/reversesshfs/rooted_others.go
++++ b/pkg/reversesshfs/rooted_others.go
+@@ -15,6 +15,15 @@ func newRootedServer(io.ReadWriteCloser, string, bool, []string) (*sftp.RequestS
+ 	return nil, nil, errors.New("the rooted builtin sftp server is supported only on Linux, macOS, and Windows")
+ }
+ 
++func newRootedServerAt(rwc io.ReadWriteCloser, localPath, _ string, readonly bool, names []string) (*sftp.RequestServer, *rootedHandlers, error) {
++	return newRootedServer(rwc, localPath, readonly, names)
++}
++
+ func (*rootedHandlers) Close() error { return nil }
+ 
+ func (*rootedHandlers) expectRemove(string) bool { return false }
++
++func ServeReadOnlyProject(rwc io.ReadWriteCloser, localPath string, _ bool, _ ProjectMountProbe) error {
++	_, _, err := newRootedServer(rwc, localPath, true, nil)
++	return err
++}
+diff --git a/pkg/reversesshfs/serve.go b/pkg/reversesshfs/serve.go
+index e8b7491..226676b 100644
+--- a/pkg/reversesshfs/serve.go
++++ b/pkg/reversesshfs/serve.go
+@@ -1,6 +1,29 @@
+ package reversesshfs
+ 
+-import "io"
++import (
++	"io"
++	"os"
++	"time"
++)
++
++// ProjectMountProbe is a file visible only by direct lookup on a read-only
++// project transport. It lets the guest verify the mount without touching disk.
++type ProjectMountProbe struct {
++	Filename  string
++	Challenge string
++}
++
++type projectProbeFile struct {
++	ProjectMountProbe
++	created time.Time
++}
++
++func (f projectProbeFile) Name() string       { return f.Filename }
++func (f projectProbeFile) Size() int64        { return int64(len(f.Challenge)) }
++func (f projectProbeFile) Mode() os.FileMode  { return 0444 }
++func (f projectProbeFile) ModTime() time.Time { return f.created }
++func (f projectProbeFile) IsDir() bool        { return false }
++func (f projectProbeFile) Sys() any           { return nil }
+ 
+ // ServeConfined serves only localPath over an already secured transport. It uses
+ // the same root and metadata protections as builtin reverse-sshfs mounts.
+diff --git a/pkg/reversesshfs/serve_virtual_test.go b/pkg/reversesshfs/serve_virtual_test.go
+index d23f208..67ea768 100644
+--- a/pkg/reversesshfs/serve_virtual_test.go
++++ b/pkg/reversesshfs/serve_virtual_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"io"
+ 	"net"
+ 	"os"
++	"path"
+ 	"path/filepath"
+ 	"testing"
+ 	"time"
+@@ -11,6 +12,67 @@ import (
+ 	"github.com/pkg/sftp"
+ )
+ 
++func TestReadOnlyProjectMountProbeKeepsTheSourceUntouched(t *testing.T) {
++	for name, virtual := range map[string]bool{"linux-and-macos": false, "windows": true} {
++		t.Run(name, func(t *testing.T) {
++			directory := t.TempDir()
++			if err := os.WriteFile(filepath.Join(directory, "project.txt"), []byte("source"), 0600); err != nil {
++				t.Fatal(err)
++			}
++			serverSide, clientSide := net.Pipe()
++			defer serverSide.Close()
++			defer clientSide.Close()
++			_ = serverSide.SetDeadline(time.Now().Add(5 * time.Second))
++			_ = clientSide.SetDeadline(time.Now().Add(5 * time.Second))
++			probe := ProjectMountProbe{Filename: ".cage-mount-probe-test", Challenge: "current mounted project"}
++			go func() { _ = ServeReadOnlyProject(serverSide, directory, virtual, probe) }()
++			client, err := sftp.NewClientPipe(clientSide, clientSide)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer client.Close()
++			root, err := client.RealPath(".")
++			if err != nil {
++				t.Fatal(err)
++			}
++			for name, expected := range map[string]string{probe.Filename: probe.Challenge, "project.txt": "source"} {
++				file, err := client.Open(path.Join(root, name))
++				if err != nil {
++					t.Fatal(err)
++				}
++				info, err := file.Stat()
++				if err != nil || info.Size() != int64(len(expected)) || !info.Mode().IsRegular() {
++					t.Fatalf("guest stat %s: %v %v", name, info, err)
++				}
++				data, err := io.ReadAll(file)
++				file.Close()
++				if err != nil || string(data) != expected {
++					t.Fatalf("guest read %s: %q %v", name, data, err)
++				}
++			}
++			if file, err := client.Create(path.Join(root, "new.txt")); err == nil {
++				file.Close()
++				t.Fatal("guest created a file in a read-only project")
++			}
++			if file, err := client.OpenFile(path.Join(root, "project.txt"), os.O_WRONLY); err == nil {
++				file.Close()
++				t.Fatal("guest opened a source file for writing")
++			}
++			if err := client.Remove(path.Join(root, "project.txt")); err == nil {
++				t.Fatal("guest deleted a source file")
++			}
++			listed, err := client.ReadDir(root)
++			if err != nil || len(listed) != 1 || listed[0].Name() != "project.txt" {
++				t.Fatalf("project listing included probe: %v %v", listed, err)
++			}
++			hostFiles, err := os.ReadDir(directory)
++			if err != nil || len(hostFiles) != 1 || hostFiles[0].Name() != "project.txt" {
++				t.Fatalf("mount probe changed project files: %v %v", hostFiles, err)
++			}
++		})
++	}
++}
++
+ func TestServeConfinedVirtualRootAndRevocation(t *testing.T) {
+ 	directory := t.TempDir()
+ 	outside := t.TempDir()

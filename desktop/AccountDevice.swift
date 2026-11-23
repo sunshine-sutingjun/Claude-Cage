@@ -33,7 +33,10 @@ final class CageAccountDevice: NSObject, URLSessionTaskDelegate, @unchecked Send
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
     private func call(_ path: String, _ body: [String: Any]? = nil) async throws -> [String: Any] {
         var request = URLRequest(url: base.appendingPathComponent("api/account" + path))
-        if path == "@session" { request.url = base.appendingPathComponent("api/session") }
+        if path == "@session" {
+            request.url = base.appendingPathComponent("api/session")
+            request.setValue("1", forHTTPHeaderField: "X-Cage-Native-Device")
+        }
         if path == "@context" { request.url = base.appendingPathComponent("api/client/context") }
         request.httpMethod = body == nil ? "GET" : "POST"
         request.setValue(base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")), forHTTPHeaderField: "Origin")

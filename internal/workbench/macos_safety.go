@@ -1,12 +1,14 @@
 package workbench
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +95,8 @@ func (s *Server) macOSGuestObservation(ctx context.Context, in map[string]any) (
 		result.PrivateFile = s.checkMacOSPrivateFile(ctx, private)
 		shared, _ := in["shared_file"].(string)
 		challenge, _ := in["challenge"].(string)
-		result.SharedFile = s.checkMacOSSharedFile(ctx, shared, challenge)
+		mode, _ := in["project_folder_mode"].(projectFolderMode)
+		result.SharedFile = s.checkMacOSSharedFile(ctx, shared, challenge, mode)
 	}
 	return result, nil
 }
@@ -129,30 +132,47 @@ func (s *Server) checkMacOSPrivateFile(ctx context.Context, private string) stri
 
 // The approved GUI login, rather than sshd, has the security-scoped bookmark.
 // Open the real project's terminal and send only the bounded marker operation.
-func (s *Server) checkMacOSSharedFile(ctx context.Context, shared, challenge string) bool {
+func (s *Server) checkMacOSSharedFile(ctx context.Context, shared, challenge string, mode projectFolderMode) bool {
 	host := filepath.Dir(shared)
 	name := filepath.Base(shared)
-	if !strings.HasPrefix(name, ".cage-share-probe-") || challenge == "" {
-		return false
-	}
 	s.mu.Lock()
 	share := s.projectShares[host]
 	approved := share != nil && share.detach != nil
 	s.mu.Unlock()
-	if !approved {
+	if !approved || challenge == "" {
 		return false
 	}
-	probe, err := os.Open(shared)
-	if err != nil {
-		return false
-	}
-	defer probe.Close()
-	info, err := probe.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	var probe *os.File
+	var receipt string
+	op := `p=` + shellescape.Quote(name) + `; if test -f "$p" && test ! -L "$p" && test "$(cat "$p")" = ` + shellescape.Quote(challenge)
+	switch mode {
+	case projectFolderRead:
+		if share.probe == nil || share.probe.Filename != name || share.probe.Challenge != challenge {
+			return false
+		}
+		receipt = randomToken()
+		// The terminal can echo the command. Send the two halves of the receipt
+		// separately so only the command's output can contain the complete line.
+		op += ` && ! ( : >> "$p" ) 2>/dev/null; then printf '\n%s%s\n' ` + shellescape.Quote(receipt[:32]) + " " + shellescape.Quote(receipt[32:]) + `; fi; exit`
+	case projectFolderWrite:
+		if share.probe != nil || !strings.HasPrefix(name, ".cage-share-probe-") {
+			return false
+		}
+		var err error
+		probe, err = os.Open(shared)
+		if err != nil {
+			return false
+		}
+		defer probe.Close()
+		info, err := probe.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+		op += `; then printf %s ` + shellescape.Quote(challenge+":guest") + ` > "$p"; fi; exit`
+	default:
 		return false
 	}
 	dir := macOSProjectPath(s.macosGuest.User, host)
-	op := `p=` + shellescape.Quote(name) + `; if test -f "$p" && test ! -L "$p" && test "$(cat "$p")" = ` + shellescape.Quote(challenge) + `; then printf %s ` + shellescape.Quote(challenge+":guest") + ` > "$p"; fi; exit`
 	cmd := s.macOSSSHCommand(ctx, "-tt", s.sshTarget(), "--", "exec /usr/local/libexec/cage-macos-terminal "+shellescape.Quote(dir))
 	tty, err := startTerminal(cmd, 80, 24)
 	if err != nil {
@@ -179,6 +199,18 @@ func (s *Server) checkMacOSSharedFile(ctx context.Context, shared, challenge str
 	}
 	timer := time.NewTimer(6 * time.Second)
 	defer timer.Stop()
+	if mode == projectFolderRead {
+		result := make(chan bool, 1)
+		go func() { result <- readMacOSProjectProbeReceipt(tty, receipt) }()
+		select {
+		case ok := <-result:
+			return ok
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		}
+	}
 	tick := time.NewTicker(80 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -195,6 +227,16 @@ func (s *Server) checkMacOSSharedFile(ctx context.Context, shared, challenge str
 			}
 		}
 	}
+}
+
+func readMacOSProjectProbeReceipt(output io.Reader, receipt string) bool {
+	scanner := bufio.NewScanner(io.LimitReader(output, 64<<10))
+	for scanner.Scan() {
+		if scanner.Text() == receipt {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) macOSVMLayout() (bool, bool) {

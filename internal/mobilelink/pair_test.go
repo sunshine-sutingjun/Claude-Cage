@@ -3,6 +3,7 @@ package mobilelink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,6 +12,39 @@ import (
 	"github.com/sylvinus/agent-vm/internal/relay"
 	"github.com/sylvinus/agent-vm/internal/remotelink"
 )
+
+func TestHostStopsWaitingWhenPairCodeExpires(t *testing.T) {
+	const admin = "private-test-credential-for-custom-relay"
+	service, err := relay.New(relay.Config{AdminToken: admin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge := httptest.NewServer(service)
+	defer edge.Close()
+	defer service.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	room, err := CreateRoom(ctx, edge.URL, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktop, err := remotelink.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := NewPairCode(edge.URL, room, desktop.Pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code.Expires = time.Now().Add(2 * time.Second).Unix()
+	err = AcceptPair(ctx, code, room.HostToken, desktop, func(string) (PairedHost, error) {
+		t.Fatal("enrolled device without completing pairing")
+		return PairedHost{}, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		t.Fatalf("host did not stop at the code deadline: %v", err)
+	}
+}
 
 func TestScanEnrollsOnlyHolderOfOriginalCode(t *testing.T) {
 	const admin = "private-test-credential-for-custom-relay"

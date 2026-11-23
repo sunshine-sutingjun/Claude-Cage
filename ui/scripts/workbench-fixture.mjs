@@ -228,11 +228,14 @@ export async function createWorkbench({
       const previous = groups.find(group => group.workspace === workspace);
       if (previous?.folders.some(path => !body.folders.includes(path)) && (state.terminals.some(t => previous.folders.includes(t.workspace) && !t.closed) || state.tabs.some(t => t.kind === "editor" && previous.folders.includes(t.workspace)))) return route.fulfill({status:409, body:"请先关闭此项目的终端和编辑器"});
       const folders = [...new Set(body.folders)];
-      state.status.project_groups = [...groups.filter(group => group.workspace !== workspace && !folders.includes(group.workspace)), {workspace, name:body.name.trim(), folders}];
+      const folderModes = Object.fromEntries(folders
+        .filter(path => (body.folder_modes?.[path] ?? previous?.folder_modes?.[path]) === "read")
+        .map(path => [path, "read"]));
+      result = {workspace, name:body.name.trim(), folders, folder_modes:folderModes};
+      state.status.project_groups = [...groups.filter(group => group.workspace !== workspace && !folders.includes(group.workspace)), result];
       const removed = (previous?.folders || []).filter(path => !folders.includes(path));
       state.status.projects = [...new Set([...state.status.projects.filter(path => !removed.includes(path)), ...folders])];
       if (removed.includes(state.settings.workspace)) state.settings.workspace = workspace;
-      result = {workspace, name:body.name.trim(), folders};
     }
     else if (path === "/projects/open") {
       if (state.failJob) return route.fulfill({ status: 400, contentType: "text/plain; charset=utf-8", body: "项目文件夹连接失败，原项目保持不变" });
@@ -317,7 +320,7 @@ export async function createWorkbench({
       result = state.terminals;
     else if (path === "/terminals") {
       if (
-        !state.status.projects.includes(
+        !(state.status.guest_workspace && body?.workspace === state.status.guest_workspace) && !state.status.projects.includes(
           body?.workspace || state.settings.workspace,
         )
       )
@@ -329,6 +332,7 @@ export async function createWorkbench({
         id: "term-" + ++state.sequence,
         title: "终端 " + (state.terminals.length + 1),
         workspace: body?.workspace || state.settings.workspace,
+        kind: body?.kind || "shell",
       };
       state.terminals.push(tab);
       result = tab;

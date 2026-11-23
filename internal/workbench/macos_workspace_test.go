@@ -237,6 +237,40 @@ func (g *macWorkspaceGuest) execute(channel ssh.Channel, command string) uint32 
 				return 0
 			}
 			input.Write(buffer[:n])
+			if operation := input.String(); strings.Contains(operation, `! ( : >> "$p" )`) && strings.HasSuffix(operation, "\r") {
+				_, proof, ok := strings.Cut(operation, `then printf '\n%s%s\n' `)
+				if !ok {
+					return 1
+				}
+				parts, err := shellquote.Split(strings.SplitN(proof, "; fi; exit", 2)[0])
+				if err != nil || len(parts) != 2 {
+					return 1
+				}
+				g.s.mu.Lock()
+				probe := g.s.projectShares[g.hostPath].probe
+				g.s.mu.Unlock()
+				g.mu.Lock()
+				files := g.files
+				g.mu.Unlock()
+				if probe == nil || !strings.Contains(operation, probe.Filename) || !strings.Contains(operation, probe.Challenge) {
+					return 1
+				}
+				file, err := files.Open(filepath.Join(g.hostPath, probe.Filename))
+				if err != nil {
+					return 1
+				}
+				body, err := io.ReadAll(file)
+				file.Close()
+				if err != nil || string(body) != probe.Challenge {
+					return 1
+				}
+				if file, err = files.OpenFile(filepath.Join(g.hostPath, probe.Filename), os.O_WRONLY|os.O_APPEND); err == nil {
+					file.Close()
+					return 1
+				}
+				fmt.Fprintf(channel, "%s\n%s%s\n", operation, parts[0], parts[1])
+				return 0
+			}
 			if strings.Contains(input.String(), "fixture-boundary:guest") {
 				g.mu.Lock()
 				files := g.files
@@ -295,7 +329,7 @@ func TestMacOSProjectOpenWithRequiresSSHFSCapability(t *testing.T) {
 				return 0, false
 			})
 			guest.approved.Store(true)
-			if err := guest.s.ensureMacOSProjectShare(guest.hostPath); err != nil {
+			if err := guest.s.ensureMacOSProjectShare(guest.hostPath, false); err != nil {
 				t.Fatal(err)
 			}
 			command := <-mounts
@@ -345,7 +379,7 @@ func TestMacOSLegacyFSKitCleanupPinsRegistryIdentity(t *testing.T) {
 		return 0, false
 	})
 	guest.approved.Store(true)
-	if err := guest.s.ensureMacOSProjectShare(guest.hostPath); err != nil {
+	if err := guest.s.ensureMacOSProjectShare(guest.hostPath, false); err != nil {
 		t.Fatal(err)
 	}
 	guest.s.closeProjectShares()
@@ -439,12 +473,168 @@ func TestMacOSDefaultWorkspaceUsesApprovedSharedProject(t *testing.T) {
 	if err = os.WriteFile(probe, []byte("fixture-boundary"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if !s.checkMacOSSharedFile(t.Context(), probe, "fixture-boundary") {
+	if !s.checkMacOSSharedFile(t.Context(), probe, "fixture-boundary", projectFolderWrite) {
 		t.Fatal("default workspace failed shared-file round trip")
 	}
 	got, err := os.ReadFile(marker)
 	if err != nil || string(got) != "original-host-data" {
 		t.Fatal("existing host data changed")
+	}
+}
+
+func TestMacOSReadOnlyProjectBoundaryUsesGuestReceipt(t *testing.T) {
+	guest := newMacWorkspaceGuest(t)
+	s := guest.s
+	s.preferences.Workspace = ""
+	guest.approved.Store(true)
+	input, _ := json.Marshal(projectGroup{Name: "Reference", Folders: []string{guest.hostPath}, FolderModes: map[string]projectFolderMode{
+		guest.hostPath: projectFolderRead,
+	}})
+	response := windowsBrowserRequestForTest(s, http.MethodPost, "/api/projects/save", input)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save project: %d %s", response.Code, response.Body.String())
+	}
+	s.closeProjectShares()
+	s.restoreProjectShares()
+	share := s.projectShares[guest.hostPath]
+	if share == nil || share.probe == nil {
+		t.Fatal("missing read-only project transport")
+	}
+	probe := share.probe
+	probePath := filepath.Join(guest.hostPath, probe.Filename)
+	if !s.checkMacOSSharedFile(t.Context(), probePath, probe.Challenge, projectFolderRead) {
+		t.Fatal("approved read-only project failed its guest proof")
+	}
+	if _, err := os.Stat(probePath); !os.IsNotExist(err) {
+		t.Fatalf("read-only probe touched the host directory: %v", err)
+	}
+	if s.checkMacOSSharedFile(t.Context(), probePath, probe.Challenge, projectFolderWrite) {
+		t.Fatal("read-only project was accepted as writable")
+	}
+}
+
+func TestMacOSPendingProjectGroupRollsBackOnlyUncommittedShares(t *testing.T) {
+	newFolder := func() string {
+		folder, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return folder
+	}
+	output, later, existing := newFolder(), newFolder(), newFolder()
+	outputGuest := macOSProjectPath("cage", output)
+	laterGuest := macOSProjectPath("cage", later)
+	var allowOutput, failLater, activationFails atomic.Bool
+	guest := newMacWorkspaceGuest(t, func(channel ssh.Channel, command string) (uint32, bool) {
+		args, err := shellquote.Split(command)
+		if err != nil {
+			return 1, true
+		}
+		if strings.HasPrefix(command, "exec /bin/bash --noprofile --norc -c ") {
+			command = args[len(args)-1]
+			args, err = shellquote.Split(command)
+			if err != nil {
+				return 1, true
+			}
+		}
+		switch {
+		case command == "/usr/bin/open -a /Applications/CageProjectAccess.app" && activationFails.Load():
+			return 1, true
+		case strings.HasPrefix(command, "set -e;") && strings.Contains(command, laterGuest) && failLater.Load():
+			return 74, true
+		case len(args) == 5 && args[0] == macProjectAgent && args[1] == "probe":
+			if args[2] == outputGuest && !allowOutput.Load() {
+				return 75, true
+			}
+			fmt.Fprint(channel, "OK")
+			return 0, true
+		case strings.HasPrefix(command, "/sbin/mount |") && strings.Contains(command, outputGuest):
+			fmt.Fprintf(channel, "macfuse://3c7e13b5-dc9f-4d09-b7c3-707987db4e34 on %s (fskit, nodev, nosuid, mounted by cage)\n", outputGuest)
+			return 0, true
+		case strings.HasPrefix(command, "/sbin/mount |") && strings.Contains(command, laterGuest):
+			fmt.Fprintf(channel, "macfuse://3c7e13b5-dc9f-4d09-b7c3-707987db4e34 on %s (fskit, nodev, nosuid, mounted by cage)\n", laterGuest)
+			return 0, true
+		}
+		return 0, false
+	})
+	s := guest.s
+	s.preferences.Workspace = ""
+	if err := s.rememberSharedProject(existing); err != nil {
+		t.Fatal(err)
+	}
+	existingShare := &projectShare{}
+	s.projectShares = map[string]*projectShare{existing: existingShare}
+	input, _ := json.Marshal(projectGroup{Name: "Mixed", Folders: []string{guest.hostPath, output, later}, FolderModes: map[string]projectFolderMode{
+		guest.hostPath: projectFolderRead,
+	}})
+	requestSave := func() *httptest.ResponseRecorder {
+		return windowsBrowserRequestForTest(s, http.MethodPost, "/api/projects/save", input)
+	}
+	promptFrom := func(response *httptest.ResponseRecorder) projectApprovalPrompt {
+		t.Helper()
+		var prompt projectApprovalPrompt
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &prompt) != nil || prompt.Workspace != output || prompt.Approval == "" {
+			t.Fatalf("pending authorization: %d %s", response.Code, response.Body.String())
+		}
+		return prompt
+	}
+	assertNoStagedShares := func() {
+		t.Helper()
+		paths, err := s.projectPaths()
+		if err != nil || len(paths) != 1 || paths[0] != existing || len(s.projectShares) != 1 || s.projectShares[existing] != existingShare || s.pendingProjectGroup != nil {
+			t.Fatalf("staged sharing survived rollback: %v %v", paths, err)
+		}
+	}
+	prompt := promptFrom(requestSave())
+	readOnly, writable := s.projectShares[guest.hostPath], s.projectShares[output]
+	if readOnly == nil || readOnly.probe == nil || writable == nil || writable.probe != nil || len(s.pendingProjectGroup.shares) != 2 {
+		t.Fatal("pending approval did not own the mixed uncommitted transports")
+	}
+	nested := filepath.Join(guest.hostPath, "nested")
+	if err := os.Mkdir(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := json.Marshal(map[string]any{"workspace": nested, "add": true})
+	if response := windowsBrowserRequestForTest(s, http.MethodPost, "/api/projects/open", open); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "共享权限冲突") {
+		t.Fatalf("independent writer overlapped a pending read-only folder: %d %s", response.Code, response.Body.String())
+	}
+	if promptFrom(requestSave()) != prompt || s.projectShares[guest.hostPath] != readOnly || s.projectShares[output] != writable {
+		t.Fatal("retry did not resume the same pending group")
+	}
+	cancelBody, _ := json.Marshal(map[string]string{"workspace": prompt.Workspace, "grant": prompt.Approval, "action": "cancel"})
+	if response := windowsBrowserRequestForTest(s, http.MethodPost, "/api/macos/project-approval", cancelBody); response.Code != http.StatusOK {
+		t.Fatalf("cancel authorization: %d %s", response.Code, response.Body.String())
+	}
+	assertNoStagedShares()
+	expired := promptFrom(requestSave())
+	s.mu.Lock()
+	s.projectShares[output].approvalTimer.Stop()
+	s.projectShares[output].approval = ""
+	s.mu.Unlock()
+	if !s.cancelMacOSProjectApproval(expired.Workspace, expired.Approval) {
+		t.Fatal("group expiration needed a live approval prompt")
+	}
+	assertNoStagedShares()
+	activationFails.Store(true)
+	if response := requestSave(); response.Code != http.StatusBadRequest || response.Header().Get("X-Cage-Recovery") != "project-approval" {
+		t.Fatalf("injected window activation failure: %d %s", response.Code, response.Body.String())
+	}
+	assertNoStagedShares()
+	activationFails.Store(false)
+	promptFrom(requestSave())
+	allowOutput.Store(true)
+	failLater.Store(true)
+	if response := requestSave(); response.Code != http.StatusBadRequest {
+		t.Fatalf("injected later failure: %d %s", response.Code, response.Body.String())
+	}
+	assertNoStagedShares()
+	failLater.Store(false)
+	if response := requestSave(); response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"approval"`) {
+		t.Fatalf("complete group: %d %s", response.Code, response.Body.String())
+	}
+	saved, err := s.readSharedProjects()
+	if err != nil || len(saved.Paths) != 4 || saved.folderMode(guest.hostPath) != projectFolderRead || saved.folderMode(output) != projectFolderWrite || s.pendingProjectGroup != nil {
+		t.Fatalf("mixed authorization not committed: %+v %v", saved, err)
 	}
 }
 

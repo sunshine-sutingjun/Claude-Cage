@@ -2,8 +2,71 @@ package workbench
 
 import (
 	"net/http"
+	"slices"
 	"time"
 )
+
+type projectApprovalPrompt struct {
+	Workspace string `json:"workspace"`
+	Approval  string `json:"approval"`
+}
+
+type pendingProjectGroup struct {
+	workspace string
+	folders   []string
+	modes     map[string]projectFolderMode
+	prompt    projectApprovalPrompt
+	shares    map[string]*projectShare
+	timer     *time.Timer
+}
+
+const projectApprovalTimeout = 5 * time.Minute
+
+func (s *Server) swapPendingProjectGroup(next *pendingProjectGroup) *pendingProjectGroup {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.pendingProjectGroup
+	if previous != nil {
+		previous.timer.Stop()
+	}
+	s.pendingProjectGroup = next
+	if next != nil {
+		next.timer = time.AfterFunc(projectApprovalTimeout, func() {
+			s.op.Lock()
+			defer s.op.Unlock()
+			s.cancelMacOSProjectApproval(next.prompt.Workspace, next.prompt.Approval)
+		})
+	}
+	return previous
+}
+
+func (s *Server) uncommittedProjectShares(folders []string, grants map[string]projectFolderMode) map[string]*projectShare {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	shares := make(map[string]*projectShare)
+	for _, folder := range folders {
+		if _, committed := grants[folder]; !committed && s.projectShares[folder] != nil {
+			shares[folder] = s.projectShares[folder]
+		}
+	}
+	return shares
+}
+
+func (s *Server) discardUncommittedProjectShares(shares map[string]*projectShare) {
+	if len(shares) == 0 {
+		return
+	}
+	committed, _ := s.projectPaths()
+	var discard []string
+	s.mu.Lock()
+	for folder, share := range shares {
+		if s.projectShares[folder] == share && !slices.Contains(committed, folder) {
+			discard = append(discard, folder)
+		}
+	}
+	s.mu.Unlock()
+	s.detachProjectFolders(discard)
+}
 
 // A pending project is tied to a single live, already user-selected SFTP
 // stream. An abandoned picker must not leave that host directory accessible.
@@ -15,7 +78,7 @@ func (s *Server) beginMacOSProjectApproval(path string, share *projectShare) {
 	}
 	grant := randomToken()
 	share.approval = grant
-	share.approvalTimer = time.AfterFunc(5*time.Minute, func() {
+	share.approvalTimer = time.AfterFunc(projectApprovalTimeout, func() {
 		s.op.Lock()
 		defer s.op.Unlock()
 		s.cancelMacOSProjectApproval(path, grant)
@@ -25,15 +88,25 @@ func (s *Server) beginMacOSProjectApproval(path string, share *projectShare) {
 func (s *Server) cancelMacOSProjectApproval(path, grant string) bool {
 	s.mu.Lock()
 	share := s.projectShares[path]
-	if share == nil || !equalSecret(share.approval, grant) {
-		s.mu.Unlock()
-		return false
+	matchedShare := share != nil && equalSecret(share.approval, grant)
+	if matchedShare {
+		delete(s.projectShares, path)
+		share.approval = ""
 	}
-	delete(s.projectShares, path)
-	share.approval = ""
+	pending := s.pendingProjectGroup
+	matchedGroup := pending != nil && pending.prompt.Workspace == path && equalSecret(pending.prompt.Approval, grant)
+	if matchedGroup {
+		pending.timer.Stop()
+		s.pendingProjectGroup = nil
+	}
 	s.mu.Unlock()
-	share.close()
-	return true
+	if matchedShare {
+		share.close()
+	}
+	if matchedGroup {
+		s.discardUncommittedProjectShares(pending.shares)
+	}
+	return matchedShare || matchedGroup
 }
 
 func (s *Server) macOSProjectApproval(w http.ResponseWriter, r *http.Request) {

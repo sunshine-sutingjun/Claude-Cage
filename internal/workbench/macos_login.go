@@ -319,6 +319,13 @@ func (s *Server) macOSLoginWindow(w http.ResponseWriter, r *http.Request) {
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if input.Setup && input.Action == "finish" {
+		// The runner clears the setup marker. Require an ordinary attach to sync
+		// the browser profile before publishing readiness and restoring shares.
+		s.mu.Lock()
+		s.ready = false
+		s.mu.Unlock()
+	}
 	var result guestos.MacLoginReply
 	if json.NewEncoder(conn).Encode(input) != nil || json.NewDecoder(io.LimitReader(conn, 6<<20)).Decode(&result) != nil {
 		http.Error(w, "客机登录界面无法响应", 503)
@@ -331,9 +338,6 @@ func (s *Server) macOSLoginWindow(w http.ResponseWriter, r *http.Request) {
 	if input.Action == "open" && ctx.Err() != nil {
 		s.revokeMacLogin(result.Session)
 		return
-	}
-	if input.Setup && input.Action == "finish" && result.Error == "" && !s.macSetupPending() {
-		s.restoreProjectShares()
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

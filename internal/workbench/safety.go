@@ -305,14 +305,17 @@ func boundaryProbeInput(port int, nonce, privateFile, sharedFile, challenge stri
 		"private_file":    guestPath(privateFile), "shared_file": guestPath(sharedFile), "challenge": challenge}
 }
 
-func filesystemBoundaryVerified(layout bool, boundary guestObservation, data, challenge string, noHostProjects bool) bool {
+func filesystemBoundaryVerified(layout bool, boundary guestObservation, data, challenge string, noHostProjects bool, mode projectFolderMode) bool {
 	if !layout || boundary.PrivateFile != "unreachable" {
 		return false
 	}
 	if noHostProjects {
 		return !boundary.SharedFile && data == challenge
 	}
-	return boundary.SharedFile && data == challenge+":guest"
+	if mode == projectFolderRead {
+		return boundary.SharedFile
+	}
+	return mode == projectFolderWrite && boundary.SharedFile && data == challenge+":guest"
 }
 
 func (s *Server) guestObservation(ctx context.Context, input map[string]any) (guestObservation, error) {
@@ -798,6 +801,8 @@ func (s *Server) runSafetyCheck() (returned error) {
 		defer private.Close()
 		shareRoot := s.environmentDir()
 		noHostProjects := false
+		mode := projectFolderWrite
+		var sharedPath, challenge string
 		if s.macosGuest != nil {
 			shareRoot = s.workspace()
 			projects, e := s.projectPaths()
@@ -835,34 +840,50 @@ func (s *Server) runSafetyCheck() (returned error) {
 					return e
 				}
 				shareRoot = approved
+				s.mu.Lock()
+				share := s.projectShares[approved]
+				s.mu.Unlock()
+				if share == nil {
+					return errors.New("项目共享已断开，请重新连接项目后验证文件边界")
+				}
+				if share.probe != nil {
+					mode = projectFolderRead
+					sharedPath = filepath.Join(shareRoot, share.probe.Filename)
+					challenge = share.probe.Challenge
+				}
 			}
 		}
-		shared, err := os.CreateTemp(shareRoot, ".cage-share-probe-*")
-		if err != nil {
-			return usererror.Wrap("创建项目共享检查文件", err, "请确认环境目录仍存在且可写，再重新检测；不要删除个人配置目录。外网保持关闭。")
-		}
-		defer os.Remove(shared.Name())
-		defer shared.Close()
-		challenge := randomToken()
-		if _, err = shared.WriteString(challenge); err != nil {
-			return err
-		}
-		if err = shared.Sync(); err != nil {
-			return err
+		var shared *os.File
+		if sharedPath == "" {
+			shared, err = os.CreateTemp(shareRoot, ".cage-share-probe-*")
+			if err != nil {
+				return usererror.Wrap("创建项目共享检查文件", err, "请确认环境目录仍存在且可写，再重新检测；不要删除个人配置目录。外网保持关闭。")
+			}
+			sharedPath = shared.Name()
+			defer os.Remove(sharedPath)
+			defer shared.Close()
+			challenge = randomToken()
+			if _, err = shared.WriteString(challenge); err != nil {
+				return err
+			}
+			if err = shared.Sync(); err != nil {
+				return err
+			}
 		}
 		control, _ := url.Parse(s.origin)
 		port, _ := strconv.Atoi(control.Port())
 		s.setMessage("正在验证离线约束、共享文件与系统配置…")
-		boundaryInput := boundaryProbeInput(port, report.ID, private.Name(), shared.Name(), challenge)
+		boundaryInput := boundaryProbeInput(port, report.ID, private.Name(), sharedPath, challenge)
 		boundaryInput["timezone"] = cfg.Timezone
 		if s.windowsGuest != nil {
-			if err := s.windowsBoundaryInput(shareRoot, private.Name(), shared.Name(), challenge, boundaryInput); err != nil {
+			if err := s.windowsBoundaryInput(shareRoot, private.Name(), sharedPath, challenge, boundaryInput); err != nil {
 				return err
 			}
 		}
 		if s.macosGuest != nil {
 			boundaryInput["run_id"] = state.RunID
 			boundaryInput["check_id"] = state.CheckID
+			boundaryInput["project_folder_mode"] = mode
 		}
 		if containerenv.Configured(s.profile) {
 			boundaryInput["management_host"] = containerenv.GatewayIP
@@ -894,14 +915,22 @@ func (s *Server) runSafetyCheck() (returned error) {
 				}
 				set("guest_settings", cage.CheckFailed, evidence, "重新应用时区与语言后重启环境")
 			}
-			_, _ = shared.Seek(0, io.SeekStart)
-			sharedData, _ := io.ReadAll(io.LimitReader(shared, 256))
-			if noHostProjects && filesystemBoundaryVerified(shares, boundary, string(sharedData), challenge, true) {
-				set("filesystem_boundary", cage.CheckPassed, "未授权主机项目，未建立项目共享；宿主私有目录探针不可读；虚拟机无基础目录挂载", "")
-			} else if !noHostProjects && filesystemBoundaryVerified(shares, boundary, string(sharedData), challenge, false) {
-				set("filesystem_boundary", cage.CheckPassed, "共享读写探针往返成功；宿主私有目录探针不可读；环境基础共享目录与明确打开的项目使用受目录约束的传输，项目内允许 Git 读写", "")
+			var sharedData []byte
+			if shared != nil {
+				_, _ = shared.Seek(0, io.SeekStart)
+				sharedData, _ = io.ReadAll(io.LimitReader(shared, 256))
+			}
+			if filesystemBoundaryVerified(shares, boundary, string(sharedData), challenge, noHostProjects, mode) {
+				switch {
+				case noHostProjects:
+					set("filesystem_boundary", cage.CheckPassed, "未授权主机项目，未建立项目共享。宿主私有目录探针不可读。虚拟机无基础目录挂载。", "")
+				case mode == projectFolderRead:
+					set("filesystem_boundary", cage.CheckPassed, "只读项目探针读取成功，写入被拒绝。宿主私有目录探针不可读。", "")
+				default:
+					set("filesystem_boundary", cage.CheckPassed, "共享读写探针往返成功。宿主私有目录探针不可读。", "")
+				}
 			} else {
-				set("filesystem_boundary", cage.CheckFailed, "共享读写、私有目录探针或挂载范围未符合预期", "检查共享目录；不要共享主目录或 Cage 配置目录")
+				set("filesystem_boundary", cage.CheckFailed, "共享权限、私有目录探针或挂载范围未符合预期", "检查共享目录权限与挂载范围")
 			}
 			if after.PolicyVerified && networkLayout && after.Configuration == cfg.Fingerprint() && !boundary.PublicConnected && after.Counters.TCPDenied > state.Counters.TCPDenied {
 				set("egress_policy", cage.CheckPassed, "运行中策略检查符合预期；未配置额外网卡；检查期间的公网 TCP 请求被 环境外网络层拒绝", "")

@@ -33,18 +33,18 @@ try {
   const img = pane.getByRole("img");
   async function fillsPane() {
     await page.waitForFunction(() => {
-      const box=document.querySelector(".mac-claude-frame"), img=box?.querySelector("img");
-      if (!img?.complete || !img.naturalWidth) return false;
+      const box=document.querySelector(".mac-claude-frame"), img=box?.querySelector("canvas");
+      if (!img?.width) return false;
       const a=img.getBoundingClientRect(), b=box.getBoundingClientRect();
       return Math.abs(a.width-b.width)<2 && Math.abs(a.height-b.height)<2 &&
-        Math.abs(img.naturalWidth-2*b.width)<3 && Math.abs(img.naturalHeight-2*b.height)<3;
+        Math.abs(img.width-2*b.width)<3 && Math.abs(img.height-2*b.height)<3;
     });
   }
   await fillsPane();
   await page.setViewportSize({width:1110,height:750});
   await fillsPane();
   fixed=true;
-  await page.waitForFunction(() => document.querySelector(".mac-claude-frame img")?.naturalWidth===1200 &&
+  await page.waitForFunction(() => document.querySelector(".mac-claude-frame canvas")?.width===1200 &&
     getComputedStyle(document.querySelector(".mac-claude-frame")).backgroundColor==="rgb(247, 245, 241)");
   const bounds = await img.boundingBox();
   assert.ok(Math.abs(bounds.width-600)<1);

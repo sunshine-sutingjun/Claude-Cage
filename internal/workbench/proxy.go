@@ -129,12 +129,7 @@ func (s *Server) subscriptionClient(host bool) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: e.DialContext}, Timeout: 30 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
-		if len(via) >= 3 || r.URL.Scheme != "https" || r.URL.User != nil {
-			return errors.New("订阅重定向被拒绝")
-		}
-		return nil
-	}}, nil
+	return managedproxy.NewSubscriptionClient(&http.Transport{Proxy: nil, DialContext: e.DialContext}), nil
 }
 func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64) error {
 	p, err := managedproxy.Load(s.profile)

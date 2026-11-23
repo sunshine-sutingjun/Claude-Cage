@@ -3,13 +3,56 @@ package workbench
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"maps"
+	"net/http"
+	"strings"
 )
+
+// The launcher signs an existing single-use ticket only on the private native
+// or SSH pipe. Browser launch URLs never carry this additional authority.
+func deviceMAC(token, purpose string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("Cage native account device v1\x00" + purpose))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func deviceTicket(token, ticket string) string {
+	return ticket + "." + deviceMAC(token, "ticket:"+ticket)
+}
+
+func deviceCookie(sessionName, token string) *http.Cookie {
+	return &http.Cookie{Name: sessionName + "-device", Value: deviceMAC(token, "cookie"), Path: "/api/account/", HttpOnly: true, SameSite: http.SameSiteStrictMode}
+}
+
+func nativeDeviceRoute(path string) bool {
+	switch path {
+	case "/api/account/device-enroll", "/api/account/device-unlock", "/api/account/device-revoke":
+		return true
+	}
+	return false
+}
+
+func (s *Server) exchangeSessionTicket(w http.ResponseWriter, r *http.Request, value string) bool {
+	ticket, signature, signed := strings.Cut(value, ".")
+	if signed && !equalSecret(signature, deviceMAC(s.token, "ticket:"+ticket)) {
+		return false
+	}
+	if !s.consumeTicket(ticket) {
+		return false
+	}
+	// An older gateway consumes SSH tickets as ordinary sessions. Only a
+	// gateway that enforces this boundary may obtain an upstream device cookie.
+	if signed && r.Header.Get("X-Cage-Native-Device") == "1" {
+		http.SetCookie(w, deviceCookie(s.cookieName(), s.token))
+	}
+	return true
+}
 
 type accountDevice struct {
 	ID        string `json:"id"`

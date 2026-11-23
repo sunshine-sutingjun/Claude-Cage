@@ -144,3 +144,31 @@ func TestCredentialLocation(t *testing.T) {
 		t.Error("~/.SSH let through where case is ignored")
 	}
 }
+
+func TestHostAgentCredentialsExcludedFromProjects(t *testing.T) {
+	s := newSandbox(t)
+	custom := s.root + "/private-configs/claude"
+	for _, dir := range []string{s.home + "/.claude", s.home + "/.codex", custom, s.proj + "/.claude"} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{s.home + "/.claude/.credentials.json", s.home + "/.claude.json", s.home + "/.codex/auth.json"} {
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", custom)
+	t.Setenv("CODEX_HOME", "")
+	protected := []string{s.home + "/.claude", s.home + "/.claude/.credentials.json", s.home + "/.claude.json", s.home + "/.codex/auth.json", custom, filepath.Dir(custom)}
+	refs := s.refs()
+	for _, path := range protected {
+		if _, denied := UnsafeProject(path, refs); !denied {
+			t.Errorf("credential path accepted as a project: %s", path)
+		}
+	}
+	// Project-scoped configuration and skills may still be shared.
+	if why, denied := UnsafeProject(s.proj+"/.claude", refs); denied {
+		t.Errorf("project-specific settings denied: %s", why)
+	}
+}

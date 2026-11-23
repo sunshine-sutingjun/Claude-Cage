@@ -1,8 +1,10 @@
 use strict;
 use warnings;
+use Errno qw(EACCES EPERM EROFS);
 use File::Temp qw(tempdir);
 use POSIX qw(_exit WNOHANG);
 use Socket qw(AF_UNIX SOCK_STREAM PF_UNSPEC);
+use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC);
 
 my $server_readonly = @ARGV == 1 && $ARGV[0] eq 'server-readonly';
 die "invalid probe mode" if @ARGV && !$server_readonly;
@@ -45,19 +47,30 @@ my $ok = eval {
     push @children, spawn_peer($a,$b,'/usr/libexec/sftp-server','-R','-d',$source);
     # FSKit before macOS 26.4 cannot advertise a read-only mount. The SFTP
     # endpoint stays -R in both modes and remains the authority for writes.
-    my $options = 'slave,'.($server_readonly ? '' : 'ro,').'quiet,backend=fskit,nodev,nosuid,dir_cache=no';
+    # This socketpair fixture lives entirely inside the guest. Mark it local
+    # so testing it does not require access to network volumes over SSH.
+    # Real host project mounts keep their separate folder authorization.
+    my $options = 'slave,'.($server_readonly ? '' : 'ro,').'quiet,backend=fskit,local,nodev,nosuid,dir_cache=no';
     push @children, spawn_peer($b,$a,'/usr/local/libexec/cage-sshfs',":$source",$mount,'-f','-o',$options);
     close $a; close $b;
-    for (1..35) {
+    my $mount_deadline = clock_gettime(CLOCK_MONOTONIC) + 12;
+    while (1) {
         $attached = mounted_line();
         last if $attached;
-        last unless kill 0, $children[1];
-        select undef,undef,undef,0.2;
+        if (waitpid($children[1], WNOHANG) == $children[1]) {
+            pop @children;
+            die "SSHFS exited before mounting the probe volume";
+        }
+        last if clock_gettime(CLOCK_MONOTONIC) >= $mount_deadline;
+        select undef,undef,undef,0.4;
     }
+    die "probe volume did not mount" unless $attached;
     my $user = getpwuid($<);
     my ($flags) = $attached =~ m{^(?:macfuse://[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|/dev/disk[0-9]+s[0-9]+) on \Q$mount\E \(macfuse, ([^\n]+)\)\s*$}i;
     my %options = map { $_ => 1 } split /, /, ($flags // '');
-    die "unexpected mount" unless $options{'fskit'} && $options{'nodev'} && $options{'nosuid'} && ($server_readonly || $options{'read-only'}) && $options{"mounted by $user"};
+    # Some FSKit versions omit the read-only flag even when ro is requested.
+    # Verify the effective policy through the mounted endpoint below.
+    die "unexpected mount" unless $options{'fskit'} && $options{'local'} && $options{'nodev'} && $options{'nosuid'} && $options{"mounted by $user"};
     open my $read, '<', "$mount/readonly" or die "read-only mount unreadable";
     my $content = do { local $/; <$read> };
     close $read or die "read-only mount unreadable";
@@ -66,13 +79,17 @@ my $ok = eval {
         close $write;
         die "read-only endpoint accepted a write";
     }
+    die "unexpected write failure: $!" unless $! == EACCES || $! == EPERM || $! == EROFS;
     die "read-only source was modified" if -e "$source/forbidden";
     1;
 };
+warn $@ unless $ok;
 # Never unmount a replacement or remove a mounted tree.
 my $live = mounted_line();
 if ($live && $live eq $attached) {
-    $ok = 0 unless system('/sbin/umount','-f',$mount) == 0;
+    # The guest account may be denied an explicit unmount. FSKit can also
+    # release the volume asynchronously when its SSHFS connection closes.
+    system('/sbin/umount','-f',$mount);
 }
 for my $pid (@children) {
     if (waitpid($pid,WNOHANG)==0) {kill 'TERM',$pid}
@@ -81,8 +98,17 @@ select undef,undef,undef,0.15;
 for my $pid (@children) {
     if (waitpid($pid,WNOHANG)==0) {kill 'KILL',$pid;waitpid($pid,0)}
 }
-$ok = 0 if mounted_line();
-$ok = 0 unless rmdir $mount;
+for (1..20) {
+    $live = mounted_line();
+    last if !$live || $live ne $attached;
+    select undef,undef,undef,0.1;
+}
+if (mounted_line()) {
+    warn "probe mount still attached\n";
+    $ok = 0;
+} else {
+    $ok = 0 unless rmdir $mount;
+}
 unlink "$source/forbidden" if -e "$source/forbidden";
 $ok = 0 unless unlink "$source/readonly";
 $ok = 0 unless rmdir $source;

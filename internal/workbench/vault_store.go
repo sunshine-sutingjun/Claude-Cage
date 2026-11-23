@@ -144,6 +144,9 @@ func (db *vaultData) save(entry vaultEntry) error {
 		return errors.New("密码记录不存在，请刷新后重试")
 	}
 	if index >= 0 && entry.Password == "" {
+		if db.Entries[index].Origin != origin {
+			return errors.New("更改网站时，请输入该网站的密码")
+		}
 		entry.Password = db.Entries[index].Password
 	}
 	if entry.Password == "" {

@@ -135,13 +135,14 @@ func GitDirShare(dir string) (string, bool) {
 var credentialRel = []string{
 	".ssh", ".aws", ".gnupg", ".pki", ".kube", ".docker", ".azure", ".oci", ".terraform.d",
 	".config", ".password-store", ".1password", ".op", ".mozilla", ".thunderbird", ".var", "snap",
+	".claude", ".claude.json", ".codex",
 	".local/share/keyrings", ".local/share/gnome-keyring", ".local/share/kwalletd",
 	"Library", "AppData",
 }
 
 // credentialAbs are the environment variables naming a folder of that kind
 // outside the home folder's defaults.
-var credentialAbs = []string{"APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"}
+var credentialAbs = []string{"APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 
 // CredentialLocation says why dir must not be shared with a VM: it is,
 // contains or is inside a folder of credentials or applications' data under

@@ -26,6 +26,9 @@ func (s *Server) macOSLegacyWorkspace(record *mobileRecord) string {
 }
 
 func (s *Server) cliWorkspace(workspace string) string {
+	if workspace == guestWorkspaceID {
+		return s.guestWorkspacePath()
+	}
 	if s.macosGuest == nil {
 		return guestPath(workspace)
 	}

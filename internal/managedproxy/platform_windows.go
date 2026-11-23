@@ -156,7 +156,7 @@ func stopWindowsCoreAfterFailure(profile string, cause error) error {
 }
 
 func startWindowsCore(ctx context.Context, profile string, s Store) error {
-	name, err := PhysicalInterface(ctx)
+	name, err := s.TransportInterface(ctx)
 	if err != nil {
 		return err
 	}

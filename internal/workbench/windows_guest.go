@@ -31,6 +31,7 @@ type windowsGuestState struct {
 	ProcessSession       int                              `json:"process_session,omitempty"`
 	SandboxSID           string                           `json:"sandbox_sid,omitempty"`
 	Home                 string                           `json:"home,omitempty"`
+	GuestWorkspace       string                           `json:"guest_workspace,omitempty"`
 	Browser              windowsBrowserState              `json:"browser"`
 	Components           map[string]windowsComponentState `json:"components"`
 	Running              bool                             `json:"-"`
@@ -298,7 +299,7 @@ func (s *Server) startWindowsGuest() error {
 	if err != nil {
 		return err
 	}
-	name, err := physicalProxyInterface(s.operationContext())
+	name, err := proxyTransportInterface(proxy, s.operationContext())
 	if err != nil {
 		return err
 	}

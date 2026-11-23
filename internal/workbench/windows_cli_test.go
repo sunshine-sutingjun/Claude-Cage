@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ func init() {
 	if os.Getenv("CAGE_WINDOWS_CLI_RELAY_TEST") != "1" {
 		return
 	}
-	if len(os.Args) != 4 || os.Args[1] != "--relay-profile" || os.Args[3] != "cli" {
+	if len(os.Args) != 4 || os.Args[1] != "--relay-profile" {
 		os.Exit(2)
 	}
 	var input map[string]json.RawMessage
@@ -29,6 +30,21 @@ func init() {
 	var profile, action string
 	_ = json.Unmarshal(input["profile"], &profile)
 	_ = json.Unmarshal(input["action"], &action)
+	if os.Getenv("CAGE_WINDOWS_TEST_GUEST_WORKSPACE") != "" && (action == "open" || action == "terminal") {
+		if string(input["workspace"]) != `"guest"` || input["project_id"] != nil || input["grant"] != nil {
+			os.Exit(2)
+		}
+		if action == "open" && (os.Args[3] != "terminal" || string(input["shell"]) != `"powershell"`) ||
+			action == "terminal" && (os.Args[3] != "cli" || string(input["kind"]) != `"claude"` || input["conversation"] == nil) {
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.Stdout, `{"ready":true}`)
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+	if os.Args[3] != "cli" {
+		os.Exit(2)
+	}
 	if len(profile) != 16 || input["command"] != nil {
 		os.Exit(2)
 	}
@@ -50,6 +66,14 @@ func init() {
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"logged_in": false})
 	case "channel":
+		if workspace := os.Getenv("CAGE_WINDOWS_TEST_GUEST_WORKSPACE"); workspace != "" {
+			var query map[string]any
+			if json.Unmarshal(input["input"], &query) != nil || query["workspace"] != workspace || query["guest_workspace"] != true || query["project_id"] != nil || query["grant"] != nil {
+				os.Exit(2)
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"result": map[string]any{"ok": true}})
+			break
+		}
 		if os.Getenv("CAGE_WINDOWS_CLI_RELAY_MOBILE") == "1" {
 			var mode string
 			_ = json.Unmarshal(input["mode"], &mode)
@@ -122,6 +146,63 @@ func TestWindowsCLIRejectsRevokedAndSiblingWorkspace(t *testing.T) {
 	}
 	if !cliWorkspaceWithin(path+`\nested`, strings.ToLower(path), true) || cliWorkspaceWithin(path+`-other`, path, true) {
 		t.Fatal("Windows workspace separator or case changed authorization")
+	}
+}
+
+func TestWindowsGuestWorkspaceTerminalsAndHistory(t *testing.T) {
+	s := windowsCLIRelayFixture(t)
+	s.ready = true
+	shutdown := func(controller *Server) {
+		t.Cleanup(func() {
+			controller.closeBackground()
+			controller.terminals.close()
+			controller.activities.Wait()
+		})
+	}
+	shutdown(s)
+	if _, err := s.createTerminal(terminalRequest{Workspace: guestWorkspaceID, Kind: "shell"}); err == nil || !strings.Contains(err.Error(), "更新") {
+		t.Fatalf("old guest agent should offer a component update: %v", err)
+	}
+	const guestDir = `D:\Profiles\Guest\Cage\Workspace`
+	s.windowsState.GuestWorkspace = guestDir
+	t.Setenv("CAGE_WINDOWS_TEST_GUEST_WORKSPACE", guestDir)
+	for _, kind := range []string{"shell", "claude"} {
+		session, err := s.createTerminal(terminalRequest{Workspace: guestWorkspaceID, Kind: kind})
+		if err != nil {
+			t.Fatalf("%s terminal: %v", kind, err)
+		}
+		if session.summary()["workspace"] != guestWorkspaceID {
+			t.Fatalf("%s session lost its workspace", kind)
+		}
+		id := session.summary()["cli_session_id"].(string)
+		s.terminals.remove(session.id)
+		if kind != "claude" {
+			continue
+		}
+		record, err := s.mobileCLI.record(s.profile, id)
+		if err != nil || record.Workspace != guestWorkspaceID || record.GuestWorkspace != guestDir {
+			t.Fatalf("stored guest-only conversation: %v, %v", record, err)
+		}
+		input := map[string]any{}
+		if err := s.windowsConversationInput(record, input); err != nil {
+			t.Fatal(err)
+		}
+		var result struct{ OK bool }
+		if err := s.windowsCLIRequest(t.Context(), map[string]any{"action": "channel", "mode": "view", "input": input}, &result); err != nil || !result.OK {
+			t.Fatalf("guest conversation lookup: %+v, %v", result, err)
+		}
+		// A fresh controller has only the persisted record and the paired
+		// guest's current status. It has no terminals, mounts or catalog.
+		next := &Server{profile: s.profile, configPath: s.configPath, account: s.account, windowsGuest: s.windowsGuest, ready: true}
+		next.windowsState.GuestWorkspace = guestDir
+		shutdown(next)
+		reopened, err := next.createTerminal(terminalRequest{Workspace: record.Workspace, Kind: "claude", sharedID: record.ID})
+		if err != nil || reopened.summary()["cli_session_id"] != record.ID {
+			t.Fatalf("could not reopen guest conversation: %v", err)
+		}
+	}
+	if len(s.projectShares) != 0 {
+		t.Fatal("guest-only workspace opened host shares")
 	}
 }
 

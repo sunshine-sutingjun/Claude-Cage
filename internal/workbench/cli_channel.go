@@ -180,18 +180,11 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 	workspaces := make(map[string]string, len(paths))
 	for _, path := range paths {
 		if s.windowsGuest != nil {
-			if s.windowsGuest.Remote() {
-				if home, err := s.remoteWindowsCLIWorkspace(path); err == nil {
-					workspaces[home] = home
-				}
-				continue
+			if directory, err := s.windowsCLIWorkspacePath(path); err == nil {
+				workspaces[directory] = path
 			}
-			binding, err := s.windowsProjectForHost(path)
-			if err == nil {
-				workspaces[binding.Path] = path
-			}
-		} else {
-			workspaces[s.cliWorkspace(path)] = path
+		} else if directory := s.cliWorkspace(path); directory != "" {
+			workspaces[directory] = path
 		}
 	}
 	var found []terminalConversation
@@ -537,22 +530,11 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		record.ConnectionNotice = macOSLegacyWorkspaceNotice
 	}
 	if s.windowsGuest != nil {
-		if s.windowsGuest.Remote() {
-			home, err := s.remoteWindowsCLIWorkspace(workspace)
-			if err != nil {
-				return "", nil, err
-			}
-			record.GuestWorkspace = home
-			if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
-				return "", nil, err
-			}
-			return string(data), record, nil
-		}
-		binding, err := s.windowsProjectForHost(workspace)
+		directory, err := s.windowsCLIWorkspacePath(workspace)
 		if err != nil {
 			return "", nil, err
 		}
-		record.GuestWorkspace = binding.Path
+		record.GuestWorkspace = directory
 		if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
 			return "", nil, err
 		}
@@ -568,10 +550,16 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return "", nil, err
 	}
 	if s.macosGuest != nil {
-		if legacyWorkspace != "" {
-			return "cd -- " + shellescape.Quote(legacyWorkspace) + " && exec " + s.cliHelperCommand("macos-launch", string(data)), record, nil
+		if workspace == guestWorkspaceID {
+			// A guest-local directory is accessible to the SSH user directly.
+			// Only a host mount needs the GUI user's scoped project helper.
+			directory = s.cliWorkspace(workspace)
+		} else if legacyWorkspace != "" {
+			directory = legacyWorkspace
+		} else {
+			return s.macOSClaudeLaunch(workspace, string(data)), record, nil
 		}
-		return s.macOSClaudeLaunch(workspace, string(data)), record, nil
+		return "cd -- " + shellescape.Quote(directory) + " && exec " + s.cliHelperCommand("macos-launch", string(data)), record, nil
 	}
 	script := "cd " + shellescape.Quote(directory) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
 	return script, record, nil

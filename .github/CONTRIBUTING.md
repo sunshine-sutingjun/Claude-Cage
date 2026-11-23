@@ -44,8 +44,8 @@ macOS 应用的构建入口是 `bash scripts/build-app.sh`，Apple Silicon 与 I
 
 | 模块 | 最低 Go 版本 | 版本来源 |
 | --- | --- | --- |
-| 工作台与控制服务 | 1.26.10 | 根目录 [go.mod](../go.mod) |
-| Tailscale 客机组件 | 1.27.3 | [tools/tailnet/go.mod](../tools/tailnet/go.mod) |
+| 工作台与控制服务 | 1.26.11 | 根目录 [go.mod](../go.mod) |
+| Tailscale 客机组件 | 1.27.4 | [tools/tailnet/go.mod](../tools/tailnet/go.mod) |
 
 版本以各模块的 `go.mod` 为准。在仓库根目录先检查两个模块，再开始下载材料和编译：
 
@@ -58,7 +58,7 @@ bash scripts/build-app.sh
 
 `GOTOOLCHAIN=auto` 会在需要时查找或下载满足模块要求的工具链；未在本地找到时，需要能访问 Go 工具链下载服务。macOS CI 的 `setup-go` 读取根 `go.mod`，构建子模块时也依赖这一选择机制。规则见 [Go 工具链说明](https://go.dev/doc/toolchain)。
 
-使用 `GOTOOLCHAIN=local` 时，先让 `PATH` 中的 Go 本身满足两个模块的要求，例如 Go 1.27.3 或更新版本；仅准备 Go 1.26.10 会在构建 `tools/tailnet` 时失败。离线构建还需预先准备 Go 模块、前端依赖和构建脚本所需的下载材料。Windows 与 Linux 构建也会使用该子模块，须核对同一版本要求。
+使用 `GOTOOLCHAIN=local` 时，先让 `PATH` 中的 Go 本身满足两个模块的要求，例如 Go 1.27.4 或更新版本；仅准备 Go 1.26.11 会在构建 `tools/tailnet` 时失败。离线构建还需预先准备 Go 模块、前端依赖和构建脚本所需的下载材料。Windows 与 Linux 构建也会使用该子模块，须核对同一版本要求。
 
 ## 维护者：配置自动邀请
 

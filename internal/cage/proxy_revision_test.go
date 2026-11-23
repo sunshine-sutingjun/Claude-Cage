@@ -3,6 +3,7 @@ package cage
 import (
 	"context"
 	"encoding/json"
+	"github.com/sylvinus/agent-vm/internal/guestprofile"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"os"
 	"path/filepath"
@@ -62,6 +63,9 @@ func TestProxyRevisionRevokesOldReportAtSameEndpoint(t *testing.T) {
 
 func TestProxyRevisionControlUpdatesHostRunningRecord(t *testing.T) {
 	profile := t.TempDir()
+	if _, err := guestprofile.Create(profile, guestprofile.Options{}); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(profile, "config.json")
 	state := filepath.Join(profile, "state")
 	instance := filepath.Join(state, "lima", "qa")
@@ -123,6 +127,40 @@ func TestProxyRevisionControlUpdatesHostRunningRecord(t *testing.T) {
 	}
 	if err = cfg.CheckRunning(state); err == nil {
 		t.Fatal("old configuration still matches running record")
+	}
+}
+
+func TestProxyRevisionRejectsChangedGuestProfile(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProxyRevision = "first"
+	profile, err := guestprofile.New(guestprofile.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.GuestProfile = profile
+	for _, change := range []string{"changed", "removed", "added"} {
+		t.Run(change, func(t *testing.T) {
+			before, after := cfg, cfg
+			copy := *profile
+			after.GuestProfile = &copy
+			after.ProxyRevision = "second"
+			switch change {
+			case "changed":
+				after.GuestProfile.Hostname = "different-host"
+			case "removed":
+				after.GuestProfile = nil
+			case "added":
+				before.GuestProfile = nil
+			}
+			gate, err := NewEgressGate(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gate.Close("done")
+			if err := gate.SyncProxyRevision(after); err == nil {
+				t.Fatal("guest profile changed without an environment restart")
+			}
+		})
 	}
 }
 

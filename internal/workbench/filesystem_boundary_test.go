@@ -19,9 +19,27 @@ func TestFilesystemBoundaryWithAndWithoutProjects(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			boundary := guestObservation{PrivateFile: test.private, SharedFile: test.shared}
-			if got := filesystemBoundaryVerified(test.layout, boundary, test.data, "nonce", test.noProjects); got != test.want {
+			if got := filesystemBoundaryVerified(test.layout, boundary, test.data, "nonce", test.noProjects, projectFolderWrite); got != test.want {
 				t.Fatalf("boundary result=%t want=%t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestReadOnlyFilesystemBoundaryRequiresGuestEvidenceAndPrivateIsolation(t *testing.T) {
+	boundary := guestObservation{PrivateFile: "unreachable", SharedFile: true}
+	if !filesystemBoundaryVerified(true, boundary, "", "nonce", false, projectFolderRead) {
+		t.Fatal("read-only evidence must not require a host file to change")
+	}
+	if filesystemBoundaryVerified(false, boundary, "", "nonce", false, projectFolderRead) {
+		t.Fatal("read-only evidence was accepted with an unverified VM layout")
+	}
+	boundary.PrivateFile = "readable"
+	if filesystemBoundaryVerified(true, boundary, "", "nonce", false, projectFolderRead) {
+		t.Fatal("read-only evidence was accepted with a readable private file")
+	}
+	boundary.PrivateFile, boundary.SharedFile = "unreachable", false
+	if filesystemBoundaryVerified(true, boundary, "", "nonce", false, projectFolderRead) {
+		t.Fatal("read-only evidence was accepted without the guest receipt")
 	}
 }

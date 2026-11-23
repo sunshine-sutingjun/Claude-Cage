@@ -559,11 +559,20 @@ public final class MainActivity extends Activity {
         });
     }
     private void forget() {
+        ConnectedDevice forgotten = connections.get(trust.getString("relay", "") + "\n" + trust.getString("pin", ""));
         int attempt = ++generation; setConnecting(true);
         worker.execute(() -> {
             try {
                 credentials.forget();
-                runOnUiThread(() -> { if (generation == attempt) { invitation=null; imported=null; setConnecting(false); showAdvanced(Page.HOST); status.setText("已忘记主机。"); } });
+                runOnUiThread(() -> {
+                    if (generation != attempt) return;
+                    if (forgotten != null) disconnectDevice(forgotten);
+                    invitation = null;
+                    imported = null;
+                    setConnecting(false);
+                    showAdvanced(Page.HOST);
+                    status.setText("已忘记主机。");
+                });
             } catch (Exception e) { runOnUiThread(() -> { if (generation == attempt) { setConnecting(false); status.setText("移除未完成，请重试。"); } }); }
         });
     }
@@ -737,6 +746,7 @@ public final class MainActivity extends Activity {
         connected.view = view;
         WebView.setWebContentsDebuggingEnabled(false);
         WebSettings settings = view.getSettings(); settings.setJavaScriptEnabled(true); settings.setAllowFileAccess(false); settings.setAllowContentAccess(false);
+        settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " CageMobile/1");
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW); settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         CookieManager.getInstance().setAcceptThirdPartyCookies(view,false);

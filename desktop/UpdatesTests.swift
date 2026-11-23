@@ -76,6 +76,18 @@ enum UpdatesTests {
         try CageUpdateFiles.privateDirectory(escaped)
         try FileManager.default.createSymbolicLink(at: escaped.appendingPathComponent("outside"), withDestinationURL: hashFile)
         try rejects("app symlink escape") { try CageUpdateFiles.validateTree(escaped) }
+        let tree = root.appendingPathComponent("payload.app")
+        try CageUpdateFiles.privateDirectory(tree)
+        let target = tree.appendingPathComponent("content")
+        let alias = tree.appendingPathComponent("alias")
+        try Data("asset".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: "content")
+        try CageUpdateFiles.validateTree(tree)
+        try FileManager.default.removeItem(at: target)
+        try rejects("dangling app symlink") { try CageUpdateFiles.validateTree(tree) }
+        try FileManager.default.removeItem(at: alias)
+        try expect(mkfifo(tree.appendingPathComponent("pipe").path, 0o600) == 0, "create FIFO fixture")
+        try rejects("special file in update") { try CageUpdateFiles.validateTree(tree) }
 
         let old = root.appendingPathComponent("Cage.app"), next = root.appendingPathComponent("next.app"), backup = root.appendingPathComponent("backup.app")
         for location in [old, next, backup] { try CageUpdateFiles.privateDirectory(location) }

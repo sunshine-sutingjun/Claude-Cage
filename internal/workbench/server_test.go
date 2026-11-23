@@ -121,6 +121,51 @@ func TestBootstrapRequiresSecretAndIssuesHostOnlyCookie(t *testing.T) {
 		t.Fatalf("unsafe cookie attributes: %+v", c)
 	}
 }
+
+func TestWorkbenchAPIReadOrigin(t *testing.T) {
+	s := testServer(t)
+	handler := s.handler()
+	for _, tc := range []struct {
+		site, origin string
+		status       int
+	}{
+		{"", "", http.StatusOK},
+		{"same-origin", s.origin, http.StatusOK},
+		{"none", "", http.StatusOK},
+		{"same-site", "", http.StatusForbidden},
+		{"cross-site", "", http.StatusForbidden},
+		{"", "http://localhost:17778", http.StatusForbidden},
+	} {
+		r := httptest.NewRequest(http.MethodGet, s.origin+"/api/settings", nil)
+		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+		r.Header.Set("Sec-Fetch-Site", tc.site)
+		r.Header.Set("Origin", tc.origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.status || w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" {
+			t.Errorf("site=%q origin=%q: got %d, want %d with same-origin resource policy", tc.site, tc.origin, w.Code, tc.status)
+		}
+	}
+}
+
+func TestJSONRequestMediaType(t *testing.T) {
+	for _, tc := range []struct {
+		mediaType string
+		accepted  bool
+	}{
+		{"application/json", true},
+		{"Application/JSON; charset=utf-8", true},
+		{"application/jsonp", false},
+		{"application/json; charset=", false},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+		r.Header.Set("Content-Type", tc.mediaType)
+		w := httptest.NewRecorder()
+		if got := readJSON(w, r, &struct{}{}); got != tc.accepted || !got && w.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("media type %q: accepted %v, status %d", tc.mediaType, got, w.Code)
+		}
+	}
+}
 func TestSettingsPreserveSecretsAndRejectHostSharing(t *testing.T) {
 	s := testServer(t)
 	old, e := cage.Load(s.configPath)

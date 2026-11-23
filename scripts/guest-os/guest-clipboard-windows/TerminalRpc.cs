@@ -11,6 +11,20 @@ namespace Cage.GuestClipboard;
 // never accepted from the wire; a future project grant must be resolved here.
 internal static class TerminalRpc
 {
+    internal static string GuestWorkspacePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Cage", "Workspace");
+
+    internal static string OpenGuestWorkspace()
+    {
+        var path = GuestWorkspacePath;
+        foreach (var directory in new[] { Path.GetDirectoryName(path)!, path })
+        {
+            var info = Directory.CreateDirectory(directory);
+            if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException("guest_workspace_invalid");
+        }
+        return path;
+    }
+
     internal sealed record Launch(string Executable, string[] Arguments, string Directory, Dictionary<string, string> Environment, RemoteSandbox? Sandbox = null);
     private static readonly SemaphoreSlim Slots = new(12, 12);
     [ModuleInitializer]
@@ -52,6 +66,7 @@ internal static class TerminalRpc
             var directory = open["workspace"]?.GetValue<string>() switch
             {
                 "home" => headless ? launch!.Sandbox!.Home : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "guest" when !headless && open["project_id"] is null && open["grant"] is null => OpenGuestWorkspace(),
                 "project" => ProjectRpc.Resolve(open["project_id"]?.GetValue<string>() ?? "", open["grant"]?.GetValue<string>() ?? ""),
                 _ => throw new InvalidDataException("terminal_request_invalid")
             };

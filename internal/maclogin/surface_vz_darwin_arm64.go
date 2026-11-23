@@ -79,7 +79,6 @@ func runVZ(ctx context.Context, machine *apple.VirtualMachine, dir string) error
 		for {
 			select {
 			case <-runCtx.Done():
-				C.cageLoginStop()
 				return
 			case <-ticker.C:
 				state := machine.State()
@@ -87,7 +86,9 @@ func runVZ(ctx context.Context, machine *apple.VirtualMachine, dir string) error
 					running = true
 				}
 				if running && (state == apple.VirtualMachineStateStopped || state == apple.VirtualMachineStateError) {
-					C.cageLoginStop()
+					// Drain frame requests and close the surface while Cocoa can
+					// still service their synchronous main-queue dispatches.
+					cancel()
 					return
 				}
 			}

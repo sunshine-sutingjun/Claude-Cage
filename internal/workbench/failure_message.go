@@ -12,6 +12,15 @@ import (
 
 const failureHelp = "在设置中导出诊断包，并附上出错时正在执行的操作。"
 
+// reason is a fixed label from executionFailure's rules and is safe to keep
+// in a job receipt after the operation log has been discarded.
+type classifiedExecutionError struct {
+	error
+	reason string
+}
+
+func (e *classifiedExecutionError) Unwrap() error { return e.error }
+
 // Only recognize known diagnostics. Unrecognized process output stays in the
 // existing operation log and never becomes an arbitrary user-facing message.
 func executionFailure(action string, err error, output string) error {
@@ -20,6 +29,8 @@ func executionFailure(action string, err error, output string) error {
 		patterns     []string
 		reason, next string
 	}{
+		{[]string{"vm files preserved at"}, "虚拟机配置缺失，原有磁盘已保留", "请核对存储位置，从备份恢复该虚拟机的 lima.yaml；原目录位置可在操作详情中查看。"},
+		{[]string{"could not inspect the vm configuration", "could not read the vm configuration", "expected a regular vm configuration", "expected a vm directory at"}, "无法读取虚拟机配置，原有磁盘已保留", "请核对存储位置、目录访问权限和 lima.yaml，恢复读取后再试。"},
 		{[]string{"base vm not found"}, "基础模板缺失，无法创建或重置环境", "请先完成环境安装；已有环境的磁盘应保留，不要删除或重置个人数据。"},
 		{[]string{"base vm setup did not complete"}, "基础模板尚未安装完成", "请继续环境安装后重试；已有环境的磁盘应保留，不要删除或重置个人数据。"},
 		{[]string{"cage_windows_maintenance_authorization_canceled"}, "已取消 Windows 管理员授权", "请重新发起原操作，并在 Windows 系统授权窗口中确认。"},
@@ -44,7 +55,7 @@ func executionFailure(action string, err error, output string) error {
 	} {
 		for _, pattern := range rule.patterns {
 			if strings.Contains(lower, pattern) {
-				return usererror.New(action, rule.reason, rule.next, err)
+				return &classifiedExecutionError{usererror.New(action, rule.reason, rule.next, err), rule.reason}
 			}
 		}
 	}

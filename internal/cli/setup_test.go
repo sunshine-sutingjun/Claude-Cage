@@ -333,3 +333,26 @@ func TestCageSetupResumesExistingBuild(t *testing.T) {
 		t.Fatalf("partial build was recreated instead of resumed: %s", log)
 	}
 }
+
+func TestSetupPreservesUnconfiguredBaseDisks(t *testing.T) {
+	for _, name := range []string{building, vmname.Template} {
+		t.Run(name, func(t *testing.T) {
+			te := newTestEnv(t, vmtest.New())
+			dir := filepath.Join(LimaHome(te.state), name)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			disk := filepath.Join(dir, "diffdisk")
+			const original = "existing VM disk"
+			if err := os.WriteFile(disk, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if code := te.setupBase([]string{"setup", "--preinstall=none"}); code == 0 || !strings.Contains(te.out(), "VM files preserved at "+dir) {
+				t.Fatalf("setup did not explain how to recover %s: %s", dir, te.out())
+			}
+			if got, err := os.ReadFile(disk); err != nil || string(got) != original {
+				t.Fatalf("setup changed the original %s disk: %q, %v", name, got, err)
+			}
+		})
+	}
+}

@@ -38,7 +38,7 @@ docker compose -f deploy/relay/compose.yaml config --quiet
 docker compose -f deploy/relay/compose.yaml up -d --build
 ```
 
-将示例域名改为自己的域名。密钥生成命令拒绝覆盖已有文件；已有部署直接复用原文件。Compose 缺少域名、密钥路径或文件所有者标识时会直接报错。Go 构建镜像固定为与项目声明一致的 `1.26.10`，Caddy 固定为 `2.11.8-alpine`；镜像升级需修改并验证配置，不使用 `latest`。
+将示例域名改为自己的域名。密钥生成命令拒绝覆盖已有文件；已有部署直接复用原文件。Compose 缺少域名、密钥路径或文件所有者标识时会直接报错。Go 构建镜像固定为与项目声明一致的 `1.26.11`，Caddy 固定为 `2.11.8-alpine`；镜像升级需修改并验证配置，不使用 `latest`。
 
 密钥作为只读 Compose secret 挂载，中继容器以密钥文件所有者的 UID/GID 运行。Docker Compose 对文件来源 secret 使用绑定挂载，不能依赖 secret 的 `uid`、`gid` 或 `mode` 设置替代主机文件权限。[Docker secrets 文档](https://docs.docker.com/compose/how-tos/use-secrets/)
 

@@ -253,3 +253,22 @@ func TestHostSubscriptionUsesChosenProxyAndPinnedPublicIP(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscriptionRedirectKeepsOriginalURLPrivate(t *testing.T) {
+	destination := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Referer() != "" {
+			t.Error("redirect disclosed the subscription URL in Referer")
+		}
+		io.WriteString(w, "proxies: []")
+	}))
+	defer destination.Close()
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+"/subscription", http.StatusFound)
+	}))
+	defer origin.Close()
+	client := NewSubscriptionClient(origin.Client().Transport)
+	data, _, err := Fetch(t.Context(), client, origin.URL+"/private-path?token=fixture")
+	if err != nil || string(data) != "proxies: []" {
+		t.Fatalf("subscription redirect failed: %v", err)
+	}
+}

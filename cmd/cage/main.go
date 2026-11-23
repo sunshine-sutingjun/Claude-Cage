@@ -418,9 +418,14 @@ func run() int {
 				options.CompleteUpdate = true
 			case "--existing":
 				options.UseExisting = true
+			case "--native-device":
+				options.NativeDevice = true
 			default:
 				return fail(fmt.Errorf("unknown desktop option: %s", argument))
 			}
+		}
+		if options.NativeDevice && (!returnJSON || options.UseExisting || options.CompleteUpdate) {
+			return fail(fmt.Errorf("--native-device requires desktop --json"))
 		}
 		entry, err := workbench.DesktopEntry(path, options)
 		if err != nil {

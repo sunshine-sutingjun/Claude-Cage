@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,15 +103,15 @@ func TestMacOSWorkloadStartsNetworkSupervision(t *testing.T) {
 	s := testServer(t)
 	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "guestdev"}
 	checked := make(chan struct{}, 1)
-	previous := physicalProxyInterface
-	physicalProxyInterface = func(ctx context.Context) (string, error) {
+	previous := proxyTransportInterface
+	proxyTransportInterface = func(_ managedproxy.Store, ctx context.Context) (string, error) {
 		select {
 		case checked <- struct{}{}:
 		default:
 		}
 		return "", errors.New("network disconnected")
 	}
-	defer func() { s.closeBackground(); physicalProxyInterface = previous }()
+	defer func() { s.closeBackground(); proxyTransportInterface = previous }()
 	s.startMonitors()
 	select {
 	case <-checked:

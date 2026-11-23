@@ -56,6 +56,34 @@ func windowsCLIProfileID(profile string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// Older guest agents do not report the guest-owned directory. Only the
+// authenticated guest can choose its path; never substitute a host path.
+func (s *Server) windowsGuestWorkspacePath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.windowsGuest == nil || s.windowsGuest.Remote() || !windowsCLIAbsolutePath(s.windowsState.GuestWorkspace) {
+		return ""
+	}
+	return s.windowsState.GuestWorkspace
+}
+
+func (s *Server) windowsCLIWorkspacePath(workspace string) (string, error) {
+	if s.windowsGuest.Remote() {
+		return s.remoteWindowsCLIWorkspace(workspace)
+	}
+	if workspace == guestWorkspaceID {
+		if path := s.windowsGuestWorkspacePath(); path != "" {
+			return path, nil
+		}
+		return "", errors.New("请更新 Windows 客机工作台组件并重新连接，以使用客机工作区")
+	}
+	project, err := s.windowsProjectForHost(workspace)
+	if err != nil {
+		return "", err
+	}
+	return project.Path, nil
+}
+
 // The paired GUI agent resolves binaries and private profiles. Paths and commands
 // from a WebView never select executables in the native guest.
 func (s *Server) windowsCLIRequest(ctx context.Context, request map[string]any, output any) error {
@@ -70,10 +98,15 @@ func (s *Server) windowsCLIRequest(ctx context.Context, request map[string]any, 
 			return err
 		}
 		if path, ok := input["workspace"].(string); ok && path != "" {
+			delete(input, "guest_workspace")
+			delete(input, "project_id")
+			delete(input, "grant")
 			if s.windowsGuest.Remote() {
 				if _, err := s.remoteWindowsCLIWorkspace(path); err != nil {
 					return err
 				}
+			} else if strings.EqualFold(path, s.windowsGuestWorkspacePath()) {
+				input["guest_workspace"] = true
 			} else {
 				binding, err := s.windowsProjectForGuest(path)
 				if err != nil {
@@ -217,6 +250,14 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 		if err != nil {
 			return nil, err
 		}
+	} else if input.Workspace == guestWorkspaceID && kind != "claude-login" {
+		workspace, err = s.sessionWorkspace(input.Workspace)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.windowsCLIWorkspacePath(workspace); err != nil {
+			return nil, err
+		}
 	} else if kind != "claude-login" {
 		workspace, err = s.connectProject(input.Workspace, false)
 		if err != nil {
@@ -306,6 +347,8 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 	}
 	if project != nil {
 		request["project_id"], request["grant"] = project.ID, project.Grant
+	} else if workspace == guestWorkspaceID && kind != "claude-login" {
+		request["workspace"] = "guest"
 	}
 	if s.windowsGuest.Remote() {
 		operation = "headless-cli"

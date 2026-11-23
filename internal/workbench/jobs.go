@@ -13,17 +13,19 @@ import (
 )
 
 type Job struct {
-	Canceled      bool           `json:"canceled,omitempty"`
-	SettingsSaved bool           `json:"settings_saved,omitempty"`
-	SetupProgress *SetupProgress `json:"setup_progress,omitempty"`
-	ID            string         `json:"id"`
-	Kind          string         `json:"kind"`
-	Running       bool           `json:"running"`
-	Message       string         `json:"message"`
-	Error         string         `json:"error,omitempty"`
-	Recovery      string         `json:"recovery,omitempty"`
-	Workspace     string         `json:"workspace,omitempty"`
-	Log           string         `json:"log,omitempty"`
+	ReceiptUnavailable bool           `json:"receipt_unavailable,omitempty"`
+	OutcomeUnknown     bool           `json:"outcome_unknown,omitempty"`
+	Canceled           bool           `json:"canceled,omitempty"`
+	SettingsSaved      bool           `json:"settings_saved,omitempty"`
+	SetupProgress      *SetupProgress `json:"setup_progress,omitempty"`
+	ID                 string         `json:"id"`
+	Kind               string         `json:"kind"`
+	Running            bool           `json:"running"`
+	Message            string         `json:"message"`
+	Error              string         `json:"error,omitempty"`
+	Recovery           string         `json:"recovery,omitempty"`
+	Workspace          string         `json:"workspace,omitempty"`
+	Log                string         `json:"log,omitempty"`
 }
 
 var (
@@ -35,6 +37,7 @@ var (
 // lock is shared with synchronous workbench operations and monitoring.
 type jobManager struct {
 	mu           sync.Mutex
+	receipts     jobReceipts
 	state        Job
 	cancel       context.CancelFunc
 	active       *jobExecution
@@ -65,8 +68,23 @@ func (m *jobManager) submit(operation sync.Locker, kind string, pauseVersion uin
 			return Job{}, fmt.Errorf("%w：当前正在%s。请等待完成，或先停止当前操作。", errJobBusy, jobName(m.state.Kind))
 		}
 	}
+	job, previous, receiptErr := m.receipts.admit(kind)
+	if receiptErr != nil {
+		if kind != "stop" {
+			return Job{}, receiptErr
+		}
+		// A full or read-only disk must not prevent stopping the environment.
+		diagnostics.Log("error", "task", "stop receipt unavailable: "+receiptErr.Error())
+		job = Job{ID: randomToken()[:12], Kind: kind, Running: true, ReceiptUnavailable: true, Message: "正在准备…"}
+	}
 	if prepare != nil {
 		if err := prepare(); err != nil {
+			if receiptErr == nil {
+				m.receipts.entries = previous
+				if saveErr := m.receipts.save(); saveErr != nil {
+					diagnostics.Log("error", "task", "rejected job receipt cleanup: "+saveErr.Error())
+				}
+			}
 			return Job{}, err
 		}
 	}
@@ -76,7 +94,7 @@ func (m *jobManager) submit(operation sync.Locker, kind string, pauseVersion uin
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.afterSuccess = afterSuccess
-	m.state = Job{ID: randomToken()[:12], Kind: kind, Running: true, Message: "正在准备…"}
+	m.state = job
 	execution := &jobExecution{owner: m, id: m.state.ID, ctx: ctx, pauseVersion: pauseVersion}
 	execution.log = diagnostics.NewStreamWithConsumer(diagnostics.Default(), "task/"+kind, "info", func(line string) {
 		if m.state.ID == execution.id {
@@ -116,6 +134,7 @@ func (m *jobManager) submit(operation sync.Locker, kind string, pauseVersion uin
 		defer operation.Unlock()
 		m.mu.Lock()
 		if m.state.ID != execution.id {
+			m.finishLocked(execution, context.Canceled)
 			m.mu.Unlock()
 			return
 		}
@@ -150,6 +169,13 @@ func (m *jobManager) finishLocked(execution *jobExecution, err error) {
 		m.active = nil
 	}
 	if m.state.ID != execution.id {
+		// A stop superseded this execution. Its cancellation becomes terminal
+		// only once its worker has left the operation.
+		if i := m.receipts.index(execution.id); i >= 0 {
+			superseded := m.receipts.entries[i].job()
+			superseded.Canceled, superseded.Message = true, "已取消"
+			m.finishReceiptLocked(superseded, nil)
+		}
 		return
 	}
 	if err == nil {
@@ -190,11 +216,30 @@ func (m *jobManager) finishLocked(execution *jobExecution, err error) {
 		m.state.Message = "已完成"
 		diagnostics.Log("info", "task", m.state.Kind+" completed")
 	}
+	m.finishReceiptLocked(m.state, err)
+}
+
+func (m *jobManager) finishReceiptLocked(job Job, cause error) {
+	index := m.receipts.index(job.ID)
+	if index < 0 {
+		// A stop admitted while storage was unavailable has no durable record.
+		return
+	}
+	if err := m.receipts.finish(index, job, cause); err != nil {
+		// Keep the terminal result in memory. The next journal write will
+		// persist it; a crash first leaves the original admission unconfirmed.
+		if m.state.ID == job.ID {
+			m.state.ReceiptUnavailable = true
+		}
+		diagnostics.Log("error", "task", "saving job outcome: "+err.Error())
+	} else if m.state.ID == job.ID {
+		m.state.ReceiptUnavailable = false
+	}
 }
 
 func jobName(kind string) string {
 	names := map[string]string{
-		"start": "启动环境", "stop": "停止环境", "setup": "准备环境", "settings": "应用设置", "project": "连接项目目录", "storage": "迁移环境目录", "restore": "恢复配置", "resources": "应用资源配置", "safety": "检查联网条件", "network-recovery": "恢复联网", "proxy": "应用代理节点", "proxy-network": "恢复代理连接", "environment-update": "更新环境组件", "environment-tools": "更新环境工具", "claude-desktop-install": "安装 Claude Desktop", "claude-desktop-start": "打开 Claude Desktop", "claude-desktop-stop": "关闭 Claude Desktop",
+		"guest-install": "安装客户机", "start": "启动环境", "stop": "停止环境", "setup": "准备环境", "settings": "应用设置", "project": "连接项目目录", "storage": "迁移环境目录", "restore": "恢复配置", "resources": "应用资源配置", "safety": "检查联网条件", "network-recovery": "恢复联网", "proxy": "应用代理节点", "proxy-network": "恢复代理连接", "environment-update": "更新环境组件", "environment-tools": "更新环境工具", "claude-desktop-install": "安装 Claude Desktop", "claude-desktop-start": "打开 Claude Desktop", "claude-desktop-stop": "关闭 Claude Desktop",
 	}
 	if name := names[kind]; name != "" {
 		return name
@@ -268,6 +313,17 @@ func (e *jobExecution) settingsSaved() {
 	defer e.owner.mu.Unlock()
 	if e.id != "" && e.owner.state.ID == e.id && e.owner.state.Running {
 		e.owner.state.SettingsSaved = true
+	}
+	// The settings write may finish after a stop supersedes this job. Its
+	// checkpoint still belongs to the original ID, including after a restart.
+	if i := e.owner.receipts.index(e.id); i >= 0 && !e.owner.receipts.entries[i].SettingsSaved {
+		e.owner.receipts.entries[i].SettingsSaved = true
+		if err := e.owner.receipts.save(); err != nil {
+			if e.owner.state.ID == e.id {
+				e.owner.state.ReceiptUnavailable = true
+			}
+			diagnostics.Log("error", "task", "saving job checkpoint: "+err.Error())
+		}
 	}
 }
 

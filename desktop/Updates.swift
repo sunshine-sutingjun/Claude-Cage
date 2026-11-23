@@ -210,18 +210,38 @@ enum CageUpdateFiles {
         try validation?.checkCancellation()
     }
     static func validateTree(_ app: URL, validation: CageUpdateValidation? = nil) throws {
-        let base = app.resolvingSymlinksInPath().path + "/"
-        guard let items = FileManager.default.enumerator(at: app, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey], options: []) else { throw CageUpdateError("无法检查更新包内容") }
+        let keys: Set<URLResourceKey> = [.fileResourceTypeKey, .fileSizeKey]
+        guard try app.resourceValues(forKeys: [.fileResourceTypeKey]).fileResourceType == .directory,
+              let resolvedApp = realpath(app.path, nil) else { throw CageUpdateError("更新包必须包含普通应用目录") }
+        defer { free(resolvedApp) }
+        let base = String(cString: resolvedApp) + "/"
+        var enumerationError: Error?
+        guard let items = FileManager.default.enumerator(at: app, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, error in
+            enumerationError = error
+            return false
+        }) else { throw CageUpdateError("无法检查更新包内容") }
         var total: Int64 = 0
         var count = 0
         for case let entry as URL in items {
             try validation?.checkCancellation()
             count += 1
-            guard count <= 50000, entry.resolvingSymlinksInPath().path.hasPrefix(base) else { throw CageUpdateError("更新包包含越界文件或过多文件") }
-            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            if values.isRegularFile == true { total += Int64(values.fileSize ?? 0) }
-            guard total <= 1024 * 1024 * 1024 else { throw CageUpdateError("解包后的应用超过 1 GiB") }
+            guard count <= 50000 else { throw CageUpdateError("更新包包含过多文件") }
+            let values = try entry.resourceValues(forKeys: keys)
+            switch values.fileResourceType {
+            case .regular:
+                guard let size = values.fileSize, size >= 0, Int64(size) <= (1 << 30) - total else { throw CageUpdateError("解包后的应用超过 1 GiB 或文件大小无效") }
+                total += Int64(size)
+            case .directory:
+                break
+            case .symbolicLink:
+                guard let resolved = realpath(entry.path, nil) else { throw CageUpdateError("更新包包含无法解析的链接") }
+                defer { free(resolved) }
+                guard String(cString: resolved).hasPrefix(base) else { throw CageUpdateError("更新包包含越界链接") }
+            default:
+                throw CageUpdateError("更新包包含特殊文件")
+            }
         }
+        if let enumerationError { throw enumerationError }
     }
     static func withMountedImage<T>(archive: URL, directory: URL, validation: CageUpdateValidation? = nil, body: (URL) throws -> T) throws -> T {
         let mount = directory.appendingPathComponent("mount", isDirectory: true)

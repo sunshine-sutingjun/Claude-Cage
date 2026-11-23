@@ -10,6 +10,23 @@ import (
 	"testing"
 )
 
+func TestInstanceConfigurationFailureOffersDiskRecovery(t *testing.T) {
+	for _, diagnostic := range []string{
+		"VM files preserved at /private/example: lima.yaml is missing",
+		"could not inspect the VM configuration; check storage access and retry: /private/example: permission denied",
+		"could not read the VM configuration; check storage access and retry: /private/example",
+		"expected a regular VM configuration at /private/example",
+	} {
+		for _, action := range []string{"启动环境", "准备 Linux 环境"} {
+			err := executionFailure(action, errors.New("exit status 1"), diagnostic)
+			if !strings.Contains(err.Error(), "原有磁盘已保留") || !strings.Contains(err.Error(), "lima.yaml") ||
+				!strings.Contains(err.Error(), action) || strings.Contains(err.Error(), "/private/example") {
+				t.Fatalf("missing disk recovery guidance for %q: %v", diagnostic, err)
+			}
+		}
+	}
+}
+
 func TestWindowsMaintenanceFailureRetainsStageForBothJobs(t *testing.T) {
 	cause := errors.New("synthetic maintenance process failed")
 	for _, action := range []string{"修复 Windows 系统助手", "更新原生客机组件"} {

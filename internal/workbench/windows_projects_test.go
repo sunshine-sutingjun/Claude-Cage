@@ -33,7 +33,7 @@ func TestWindowsProjectTransportIsLiveAndConfined(t *testing.T) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWindowsProjectRelayHelper$")
 	cmd.Env = append(os.Environ(), "CAGE_WINDOWS_PROJECT_RPC_TEST="+receipt)
 	binding := windowsProjectBinding{ID: strings.Repeat("a", 16), Grant: strings.Repeat("b", 64)}
-	share, err := startWindowsProjectTransport(cmd, folder, binding)
+	share, err := startWindowsProjectTransport(cmd, folder, binding, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

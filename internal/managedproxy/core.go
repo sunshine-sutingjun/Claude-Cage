@@ -219,7 +219,7 @@ func Start(ctx context.Context, profile string, s Store) error {
 	if runtime.GOOS != "darwin" {
 		return errors.New("内置代理当前支持 macOS")
 	}
-	name, err := PhysicalInterface(ctx)
+	name, err := s.TransportInterface(ctx)
 	if err != nil {
 		return err
 	}

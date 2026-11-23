@@ -62,8 +62,8 @@ func interfaceMonitorServer(t *testing.T) (*Server, *cage.EgressGate) {
 }
 
 func TestInterfaceRecoveryRevokesGateAndPreservesManualPause(t *testing.T) {
-	previous := physicalProxyInterface
-	t.Cleanup(func() { physicalProxyInterface = previous })
+	previous := proxyTransportInterface
+	t.Cleanup(func() { proxyTransportInterface = previous })
 	for _, tc := range []struct {
 		name, next   string
 		paused, lost bool
@@ -75,7 +75,7 @@ func TestInterfaceRecoveryRevokesGateAndPreservesManualPause(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, gate := interfaceMonitorServer(t)
 			s.networkPaused, s.proxyNetworkLost = tc.paused, tc.lost
-			physicalProxyInterface = func(context.Context) (string, error) { return tc.next, nil }
+			proxyTransportInterface = func(managedproxy.Store, context.Context) (string, error) { return tc.next, nil }
 			// Keep the recovery queued: assert the synchronous revocation before
 			// any core can restart, then cancel through the normal stop path.
 			s.op.Lock()
@@ -103,9 +103,11 @@ func TestInterfaceRecoveryRevokesGateAndPreservesManualPause(t *testing.T) {
 
 func TestMissingPhysicalInterfaceClosesGateWithoutUnboundFallback(t *testing.T) {
 	s, gate := interfaceMonitorServer(t)
-	previous := physicalProxyInterface
-	t.Cleanup(func() { physicalProxyInterface = previous })
-	physicalProxyInterface = func(context.Context) (string, error) { return "", errors.New("physical network unavailable") }
+	previous := proxyTransportInterface
+	t.Cleanup(func() { proxyTransportInterface = previous })
+	proxyTransportInterface = func(managedproxy.Store, context.Context) (string, error) {
+		return "", errors.New("physical network unavailable")
+	}
 	s.monitorProxyInterface()
 	if gate.Status().Mode != cage.GateClosed || s.networkPaused || !s.proxyNetworkLost || s.jobs.snapshot().Running || s.currentNetworkErrorLocked() == "" {
 		t.Fatal("missing uplink did not preserve offline recovery state")

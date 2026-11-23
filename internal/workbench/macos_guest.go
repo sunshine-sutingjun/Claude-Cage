@@ -177,7 +177,9 @@ func (s *Server) attachMacOSGuest() error {
 	ctx, cancel := s.controlContext()
 	defer cancel()
 	err := s.checkMacOSGuest(ctx)
-	if err == nil {
+	setupPending := s.macSetupPending()
+	// First setup uses the runner's login surface before the GUI browser is available.
+	if err == nil && !setupPending {
 		err = s.syncNativeBrowserProfile(ctx)
 	}
 	s.mu.Lock()
@@ -186,7 +188,7 @@ func (s *Server) attachMacOSGuest() error {
 	}
 	checkComponents := err == nil && !s.macComponentsChecked
 	s.mu.Unlock()
-	if checkComponents && !s.macSetupPending() {
+	if checkComponents && !setupPending {
 		s.checkMacOSComponents()
 	}
 	s.mu.Lock()
@@ -200,12 +202,12 @@ func (s *Server) attachMacOSGuest() error {
 		s.guestUpdateError = errMacOSComponentUpdate.Error()
 	}
 	s.mu.Unlock()
-	if newlyReady && !s.macSetupPending() {
+	if newlyReady && !setupPending {
 		s.restoreProjectShares()
 		if checkAfterReconnect {
 			_, _ = s.submitJob("network-recovery", s.checkNetworkIfWanted)
 		}
-	} else if err == nil && !s.macSetupPending() {
+	} else if err == nil && !setupPending {
 		s.retryMacOSProjectShares(ctx)
 	}
 	return err

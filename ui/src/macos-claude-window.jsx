@@ -39,9 +39,9 @@ async function windowRequest(base, action, fields = {}, connection) {
 
 // Fixed-size native sign-in sheets stay at their real text size. Extend a
 // uniform window background across the pane without scaling those pixels.
-function matchWindowBackground(img, pane, canvasRef) {
+function matchWindowBackground(surface, img, pane, canvasRef) {
   if (!pane) return;
-  if (img.clientWidth >= pane.clientWidth - 1 && img.clientHeight >= pane.clientHeight - 1) return;
+  if (surface.clientWidth >= pane.clientWidth - 1 && surface.clientHeight >= pane.clientHeight - 1) return;
   if (!canvasRef.current) {
     canvasRef.current = document.createElement("canvas");
     canvasRef.current.width = 4;
@@ -59,74 +59,143 @@ function matchWindowBackground(img, pane, canvasRef) {
   pane.style.backgroundColor = uniform && pixels[3] === 255 ? `rgb(${pixels[0]}, ${pixels[1]}, ${pixels[2]})` : "";
 }
 
-export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard = "mac", remoteRef, sidebarCollapsed, onExpand, onConfirm, uploads = [], onStatus = () => {}, onFallback = () => {} }) {
+export function MacOSAppWindow({ browser = false, onOpenPage, visible, ready = true, keyboard = "mac", remoteRef, sidebarCollapsed, onExpand, onConfirm, uploads = [], onStatus = () => {}, onWindowStatus, onFallback = () => {} }) {
   const appName = browser ? "Google Chrome" : "Claude Desktop";
   const base = browser ? "/macos-browser" : "/macos/claude";
   const windowVisible = useWindowVisibility();
   const screenVisible = visible && windowVisible;
+  const connected = screenVisible && ready;
   const connection = useRef(null);
   const [inputChannel, setInputChannel] = useState(null);
   const frameConnection = useRef(null);
+  const refreshFrame = useRef(null);
   const request = (action, fields) => windowRequest(base, action, fields, connection.current);
   const [zoom, setZoom] = useDesktopZoom();
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [fileError, setFileError] = useState("");
+  const feedback = ready ? error || fileError : "正在重新连接虚拟 Mac…";
+  useEffect(() => {
+    if (!screenVisible || !feedback || !onWindowStatus) return;
+    onWindowStatus(feedback);
+    return () => onWindowStatus("");
+  }, [screenVisible, feedback, onWindowStatus]);
   const [transferring, setTransferring] = useState(false);
   const [revision, refresh] = useState(0);
-  const [image, setImage] = useState(null);
+  const [inputTarget, setInputTarget] = useState("");
+  const displayed = useRef(null);
   const frame = useRef(null);
   const surface = useRef(null);
   const controls = useRef(null);
-  const current = useRef(null);
-  current.current = { screenVisible, keyboard, input: state?.input, onStatus, onFallback };
+  const view = useRef(null);
+  view.current = { connected, keyboard, input: state?.input, onStatus, onFallback };
   const pane = useRef(null);
   const backgroundSample = useRef(null);
   const viewport = useRef(null);
   useLayoutEffect(() => {
     const element = pane.current;
-    if (!visible || !element) return;
+    if (!visible || !element) { viewport.current = null; return; }
     const measure = () => {
       const { width, height } = element.getBoundingClientRect();
-      viewport.current = width > 0 && height > 0 ? {
+      if (width <= 0 || height <= 0) return;
+      const next = {
         width: Math.min(2560, Math.max(320, Math.round(width / zoom))),
         height: Math.min(1600, Math.max(240, Math.round(height / zoom))),
-      } : null;
-      frameConnection.current?.resize(viewport.current);
+        scale: Math.max(1, Math.min(2, window.devicePixelRatio || 1)),
+      };
+      if (viewport.current?.width === next.width && viewport.current?.height === next.height && viewport.current?.scale === next.scale) return;
+      viewport.current = next;
+      frame.current = null;
+      frameConnection.current?.resize(next);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
-    return () => { observer.disconnect(); viewport.current = null; };
+    return () => observer.disconnect();
   }, [visible, zoom]);
   const picker = useRef(null);
   const pickerTarget = useRef(null);
   const generation = useRef(0);
   const launched = useRef(false);
+  const login = useRef(undefined);
+
+  useLayoutEffect(() => {
+    if (screenVisible) return;
+    if (browser) launched.current = false;
+    displayed.current = null;
+    if (surface.current) surface.current.width = 0;
+    if (pane.current) pane.current.style.backgroundColor = "";
+  }, [screenVisible, browser]);
 
   useEffect(() => {
-    if (!screenVisible) return;
-    if (browser) launched.current = false;
+    if (!connected) return;
     const epoch = ++generation.current;
     let timer;
     let current, nextStatus = 0, after = "", captureSize = "", checkFrame = true;
-    const live = () => generation.current === epoch;
-    function receiveFrame(next) {
-      if (!live()) return;
-      if (frame.current?.window !== next.window || frame.current?.pid !== next.pid || frame.current?.geometry !== next.geometry) frame.current = null;
-      setImage({
-        src: next.src || `data:${next.mime === "image/jpeg" ? "image/jpeg" : "image/png"};base64,${next.image}`,
-        window: next.window, pid: next.pid,
-        geometry: next.geometry, width: next.contentWidth, height: next.contentHeight,
-        acknowledge: next.acknowledge,
-      });
+    let captureRevision = 0;
+    const live = () => generation.current === epoch && view.current.connected;
+    refreshFrame.current = () => {
+      captureRevision++;
+      after = "";
+      checkFrame = true;
+      frameConnection.current?.refresh();
+    };
+    function invalidate(clearPixels) {
+      frame.current = null;
+      setInputTarget("");
+      if (clearPixels) {
+        displayed.current = null;
+        if (surface.current) surface.current.width = 0;
+        if (pane.current) pane.current.style.backgroundColor = "";
+      }
+    }
+    function frameError(code, message) {
+      invalidate(["requires_gui_login", "screen_recording_permission", "identity_error", "not_running", "no_visible_window"].includes(code));
+      if (code !== "window_changed") setError(message);
+    }
+    async function receiveFrame(next, size, requestedRevision) {
+      const valid = () => live() && (next.isCurrent ? next.isCurrent() : viewport.current === size && requestedRevision === captureRevision);
+      if (!valid()) return;
+      if (displayed.current && displayed.current.pid !== next.pid) invalidate(true);
+      const target = { window: next.window, pid: next.pid, geometry: next.geometry, surface: browser ? "browser" : undefined };
+      const identity = JSON.stringify(target);
+      if (displayed.current?.identity !== identity) frame.current = null;
+      const img = new Image();
+      img.src = next.src || `data:${next.mime === "image/jpeg" ? "image/jpeg" : "image/png"};base64,${next.image}`;
+      try { await img.decode(); }
+      catch (error) { if (valid()) throw error; return; }
+      const canvas = surface.current;
+      if (!valid() || !canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("窗口画面无法显示，请重新连接。");
+      // Change the visible backing store only after the replacement has decoded.
+      if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
+      if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
+      ctx.globalCompositeOperation = "copy";
+      ctx.drawImage(img, 0, 0);
+      const width = next.contentWidth || img.naturalWidth, height = next.contentHeight || img.naturalHeight;
+      canvas.style.setProperty("--frame-width", width + "px");
+      canvas.style.setProperty("--frame-aspect", width / height);
+      matchWindowBackground(canvas, img, pane.current, backgroundSample);
+      displayed.current = { pid: next.pid, identity };
+      frame.current = target;
+      setInputTarget(identity);
       setError("");
+      next.acknowledge?.();
     }
     async function poll() {
       let delay = 2200;
       try {
         if (!current || Date.now() >= nextStatus) {
           current = await request("status");
+          if (!live()) return;
+          if (browser && login.current !== undefined && login.current !== current.login) {
+            frameConnection.current?.close();
+            frameConnection.current = null;
+            invalidate(true);
+            after = "";
+          }
+          login.current = current.login;
           if (browser && current.surface !== "browser") throw new Error("请更新 macOS 环境组件以显示 Chrome 窗口。");
           checkFrame = true;
           nextStatus = Date.now() + 2200;
@@ -149,31 +218,37 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
         if (current.running && current.screen) {
           if (current.push_frames && viewport.current) {
             if (!frameConnection.current) {
-              frameConnection.current = createMacFrameConnection(receiveFrame, reason => {
+              frameConnection.current = createMacFrameConnection(next => {
+                receiveFrame(next, viewport.current).catch(() => {
+                  if (!live() || !next.isCurrent()) return;
+                  frameConnection.current?.close();
+                  frameConnection.current = null;
+                  frameError("decode_failed", "窗口画面无法解码，请重新连接。");
+                });
+              }, reason => {
                 if (!live()) return;
                 frameConnection.current = null;
                 nextStatus = 0;
-                frame.current = null;
-                setImage(null);
-                setError(messages[reason] || "未能读取虚拟 Mac 的窗口画面，请重新连接。");
+                frameError(reason, messages[reason] || "未能读取虚拟 Mac 的窗口画面，请重新连接。");
               }, base);
             }
             frameConnection.current.resize(viewport.current);
             return;
           }
-          const nextSize = JSON.stringify(viewport.current);
+          const size = viewport.current;
+          const requestedRevision = captureRevision;
+          const nextSize = JSON.stringify(size);
           if (nextSize !== captureSize) { after = ""; captureSize = nextSize; }
           const next = await request("frame", viewport.current ? {
-            after, refresh: checkFrame,
-            ...viewport.current, scale: Math.max(1, Math.min(2, window.devicePixelRatio || 1)),
+            after, refresh: checkFrame, ...size,
           } : {});
-          if (!live()) return;
+          if (!live() || requestedRevision !== captureRevision) return;
           checkFrame = false;
           delay = current.persistent ? 50 : 350;
           if (next.unchanged) return;
           after = next.sequence || "";
-          receiveFrame(next);
-        } else { frameConnection.current?.close(); frameConnection.current = null; frame.current = null; setImage(null); }
+          await receiveFrame(next, size, requestedRevision);
+        } else { frameConnection.current?.close(); frameConnection.current = null; invalidate(true); }
         setError("");
       } catch (e) {
         if (!live()) return;
@@ -181,29 +256,33 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
         setInputChannel(null);
         frameConnection.current?.close(); frameConnection.current = null;
         current = null; after = "";
-        if (live()) { frame.current = null; setImage(null); setError(e.message); }
+        frameError(e.code, e.message);
       } finally { if (live()) timer = setTimeout(poll, delay); }
     }
     poll();
     return () => {
-      generation.current++; clearTimeout(timer); frame.current = null;
+      generation.current++; clearTimeout(timer); invalidate(false);
+      refreshFrame.current = null;
       connection.current?.close(); connection.current = null;
       setInputChannel(null);
       frameConnection.current?.close(); frameConnection.current = null;
     };
-  }, [screenVisible, revision, base]);
+  }, [connected, revision, base]);
 
   async function action(name) {
     try { if (name === "stop") launched.current = true; await request(name); setError(""); refresh((n) => n + 1); }
     catch (e) { setError(e.message); }
   }
+  const reportInputError = error => {
+    if (error.code !== "window_changed") setError(error.message);
+  };
   useImperativeHandle(remoteRef, () => ({
     focus: () => controls.current?.transport.focus(),
     closeNativeTab: () => controls.current?.transport.runKeyAction(async send => {
       for (const [symbol, code, down] of [[0xffeb, "MetaLeft", true], [119, "KeyW", true], [119, "KeyW", false], [0xffeb, "MetaLeft", false]]) {
         await send(symbol, code, down);
       }
-    }).catch(e => setError(e.message)),
+    }).catch(reportInputError),
     edit: command => controls.current?.input.focused() ? controls.current.input.edit(command) : false,
     copy: () => controls.current?.input.copy(),
     paste: () => controls.current?.input.readAndPaste(),
@@ -212,30 +291,43 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   }));
 
   useEffect(() => {
-    if (!screenVisible || !state?.input || !surface.current || !pane.current || (state.persistent && !inputChannel)) return;
-    const inputRequest = (action, fields) => windowRequest(base, action, fields, inputChannel);
+    if (!connected || !inputTarget || !state?.input || !surface.current || !pane.current || (state.persistent && !inputChannel)) return;
+    const inputRequest = async (action, fields) => {
+      const target = frame.current;
+      try { return await windowRequest(base, action, fields, inputChannel); }
+      catch (error) {
+        if (error.code === "window_changed" && target && frame.current === target &&
+            fields?.geometry === target.geometry &&
+            !(action === "ime" && fields.mode === "status") &&
+            !(action === "pointer" && fields.phase === "move" && !fields.buttons)) {
+          frame.current = null;
+          refreshFrame.current?.();
+        }
+        throw error;
+      }
+    };
     const transport = createMacWindowInput({
       element: surface.current,
       frame: () => frame.current,
-      active: () => Boolean(current.current.screenVisible && current.current.input && frame.current),
+      active: () => Boolean(view.current.connected && view.current.input && frame.current),
       request: inputRequest,
-      onError: setError,
+      onError: reportInputError,
     });
     const preparePaste = () => {
       const lease = { target: transport.target(), epoch: generation.current, transport };
       return Object.assign(prepareClipboardPaste("desktop", "", { windowTarget: lease.target, valid: () => transport.valid(lease.target) }), { lease });
     };
     const input = installRemoteInput(transport, pane.current, {
-      mode: () => current.current.keyboard,
+      mode: () => view.current.keyboard,
       guestPlatform: () => "darwin",
       systemClipboard: () => true,
       copyText: (sendCopy, valid) => copyGuestText({ request: value => api("/clipboard/copy", value), sendCopy, valid }),
       surface: () => surface.current,
       inputLabel: "向 " + appName + " 输入",
       tabId: () => frame.current ? `${frame.current.pid}:${frame.current.window}:${frame.current.geometry}` : "",
-      isActive: () => Boolean(current.current.screenVisible && current.current.input && frame.current),
-      onStatus: text => current.current.onStatus(text),
-      onFallback: (...values) => current.current.onFallback(...values),
+      isActive: () => Boolean(view.current.connected && view.current.input && frame.current),
+      onStatus: text => view.current.onStatus(text),
+      onFallback: (...values) => view.current.onFallback(...values),
       insertText: text => transport.send("text", { text }),
       caretRect: session => inputRequest("ime", { ...frame.current, mode: "status", session }).catch(error => {
         if (error.code === "unknown_action") setError(error.message);
@@ -253,7 +345,7 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       input.dispose(); transport.dispose();
       if (controls.current?.transport === transport) controls.current = null;
     };
-  }, [screenVisible, state?.input, state?.persistent, inputChannel, image?.geometry, image?.pid, image?.window]);
+  }, [connected, state?.input, state?.persistent, inputChannel, inputTarget]);
 
   function receive(content, lease, prepared) {
     const target = lease?.target || frame.current;
@@ -288,36 +380,26 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   }
   if (!visible) return null;
   return <section className="claude-desktop-view mac-claude" aria-label={"虚拟 Mac 中的 " + appName}>
-    {(browser || !nativeAvailable()) && <BrowserUploads requests={uploads} onStatus={onStatus} />}
-    <DesktopToolbar title={appName} desktop={state} platform="macOS" zoom={zoom} setZoom={setZoom} onConfirm={onConfirm}
-      onStop={browser ? undefined : () => action("stop")} refresh={() => refresh(n => n+1)} sidebarCollapsed={sidebarCollapsed} onExpand={onExpand}>
-      {browser && <BrowserFavorites ready={Boolean(state?.installed)} onOpen={onOpenPage} />}
-      <MacOSLogin />
-      {!browser && <button disabled={!state?.input || !image || transferring} onClick={() => void chooseFiles()}>添加附件</button>}
-      {!browser && <input ref={picker} type="file" multiple hidden aria-label="选择 Claude 附件" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void receive({ files, kind: "paste" }, pickerTarget.current || undefined).catch(fileFailure); }} />}
-      {(!state?.running || error) && <button onClick={() => action("launch")} disabled={!state?.installed}>{state?.running ? "重新连接应用" : "打开应用"}</button>}
-      {state?.installed && !state.screen && <button onClick={() => action("request-screen")}>授权窗口画面</button>}
-      {state?.installed && !state.input && <button onClick={() => action("request-input")}>授权键鼠</button>}
-    </DesktopToolbar>
-    {error && <p role="alert">{error}</p>}
-    {fileError && <p role="alert">{fileError}</p>}
+    {ready && (browser || !nativeAvailable()) && <BrowserUploads requests={uploads} onStatus={onStatus} />}
+    <div inert={!ready}>
+      <DesktopToolbar title={appName} desktop={state} platform="macOS" zoom={zoom} setZoom={setZoom} onConfirm={onConfirm}
+        onStop={browser ? undefined : () => action("stop")}
+        refresh={state?.running ? () => action("launch") : () => refresh(n => n+1)}
+        refreshLabel={state?.running ? "重新连接 " + appName : undefined} sidebarCollapsed={sidebarCollapsed} onExpand={onExpand}>
+        {browser && <BrowserFavorites ready={Boolean(state?.installed)} onOpen={onOpenPage} />}
+        <MacOSLogin />
+        {!browser && <button disabled={!state?.input || !inputTarget || transferring} onClick={() => void chooseFiles()}>添加附件</button>}
+        {!browser && <input ref={picker} type="file" multiple hidden aria-label="选择 Claude 附件" onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void receive({ files, kind: "paste" }, pickerTarget.current || undefined).catch(fileFailure); }} />}
+        {!state?.running && <button onClick={() => action("launch")} disabled={!state?.installed}>打开应用</button>}
+        {state?.installed && !state.screen && <button onClick={() => action("request-screen")}>授权窗口画面</button>}
+        {state?.installed && !state.input && <button onClick={() => action("request-input")}>授权键鼠</button>}
+      </DesktopToolbar>
+    </div>
     {state && !state.installed && <p>此虚拟 Mac 尚未安装 {appName}。</p>}
     {state?.running && !state.screen && <p>{messages.screen_recording_permission}</p>}
     {state?.running && state.screen && !state.input && <p>{messages.accessibility_permission}</p>}
     <div ref={pane} className="mac-claude-frame" style={{ "--desktop-zoom": zoom }}>
-      {image && <img ref={surface} key={image.geometry || `${image.pid}-${image.window}`} alt={appName + " 客机窗口"} src={image.src} draggable={false}
-        onLoad={e => {
-          const img = e.currentTarget;
-          const width = image.width || img.naturalWidth;
-          const height = image.height || img.naturalHeight;
-          img.style.setProperty("--frame-width", width + "px");
-          img.style.setProperty("--frame-aspect", width / height);
-          frame.current = { window: image.window, pid: image.pid, geometry: image.geometry, surface: browser ? "browser" : undefined };
-          matchWindowBackground(img, pane.current, backgroundSample);
-          image.acknowledge?.();
-        }}
-        onError={() => { frameConnection.current?.close(); frameConnection.current = null; frame.current = null; setImage(null); setError("窗口画面无法解码，请重新连接。"); }}
-        />}
+      <canvas ref={surface} width={0} height={0} role="img" aria-label={appName + " 客机窗口"} />
     </div>
   </section>;
 }
